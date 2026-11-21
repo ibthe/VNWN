@@ -28,6 +28,47 @@ jobs:
           set -e
           mkdir -p out /tmp/giga /tmp/omni
 
+          # NLLB: словарь токенизатора готовим первым (быстро), чтобы сбой был виден сразу
+          NL=https://huggingface.co/Xenova/nllb-200-distilled-600M/resolve/main
+          curl -fL --retry 3 -o /tmp/tokenizer.json $NL/tokenizer.json
+          python3 - <<'PY'
+          import json, sys, subprocess, urllib.request
+          t = json.load(open('/tmp/tokenizer.json', encoding='utf-8'))
+          m = t['model']
+          v = m['vocab']
+          print('тип модели:', m.get('type'), '| словарь:', type(v).__name__, '| размер:', len(v))
+          print('первые элементы:', (v[:3] if isinstance(v, list) else list(v.items())[:3]))
+          def clean(x): return x.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
+          if isinstance(v, list) and v and isinstance(v[0], (list, tuple)) and len(v[0]) >= 2 and isinstance(v[0][1], (int, float)):
+              rows = [(clean(str(e[0])), float(e[1])) for e in v]
+              print('источник словаря: tokenizer.json')
+          else:
+              # запасной путь: оригинальная модель SentencePiece от Meta, оценки берём из неё
+              print('источник словаря: sentencepiece.bpe.model')
+              subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'sentencepiece'])
+              urllib.request.urlretrieve(
+                  'https://huggingface.co/facebook/nllb-200-distilled-600M/resolve/main/sentencepiece.bpe.model',
+                  '/tmp/spm.model')
+              import sentencepiece as spm
+              sp = spm.SentencePieceProcessor(model_file='/tmp/spm.model')
+              # id в HF = id в spm + 1 (сдвиг fairseq); первые четыре: <s> <pad> </s> <unk>
+              rows = [('<s>', 0.0), ('<pad>', 0.0), ('</s>', 0.0), ('<unk>', 0.0)]
+              for i in range(3, sp.get_piece_size()):
+                  rows.append((clean(sp.id_to_piece(i)), float(sp.get_score(i))))
+          with open('out/nllb-vocab.tsv', 'w', encoding='utf-8', newline='\n') as f:
+              for piece, score in rows:
+                  f.write(f"{score}\t{piece}\n")
+          with open('out/nllb-added.tsv', 'w', encoding='utf-8', newline='\n') as f:
+              for a in t['added_tokens']:
+                  f.write(f"{a['id']}\t{clean(a['content'])}\n")
+          added = {a['content']: a['id'] for a in t['added_tokens']}
+          for k in ('</s>', '<unk>', '<pad>', 'rus_Cyrl', 'eng_Latn', 'kat_Geor'):
+              assert k in added, f"нет токена {k}"
+          print('токенов в словаре:', len(rows), '| rus_Cyrl =', added['rus_Cyrl'],
+                '| eng_Latn =', added['eng_Latn'], '| kat_Geor =', added['kat_Geor'])
+          assert len(rows) >= 256000, 'словарь слишком маленький'
+          PY
+
           # Whisper + Silero VAD
           HF=https://huggingface.co/csukuangfj/sherpa-onnx-whisper-$MODEL/resolve/main
           curl -fL --retry 3 -o out/whisper-encoder.int8.onnx $HF/$MODEL-encoder.int8.onnx
@@ -57,26 +98,8 @@ jobs:
           curl -fL --retry 3 -o out/vosk-en.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
 
           # NLLB-200 distilled 600M (перевод), int8 ONNX от Xenova
-          NL=https://huggingface.co/Xenova/nllb-200-distilled-600M/resolve/main
           curl -fL --retry 3 -o out/nllb-encoder.int8.onnx $NL/onnx/encoder_model_quantized.onnx
           curl -fL --retry 3 -o out/nllb-decoder.int8.onnx $NL/onnx/decoder_model_merged_quantized.onnx
-          curl -fL --retry 3 -o /tmp/tokenizer.json $NL/tokenizer.json
-          python3 - <<'PY'
-          import json
-          t = json.load(open('/tmp/tokenizer.json', encoding='utf-8'))
-          vocab = t['model']['vocab']          # [[токен, оценка], ...]; номер строки = id токена
-          def clean(s): return s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
-          with open('out/nllb-vocab.tsv', 'w', encoding='utf-8', newline='\n') as f:
-              for piece, score in vocab:
-                  f.write(f"{score}\t{clean(piece)}\n")
-          with open('out/nllb-added.tsv', 'w', encoding='utf-8', newline='\n') as f:
-              for a in t['added_tokens']:
-                  f.write(f"{a['id']}\t{clean(a['content'])}\n")
-          added = {a['content']: a['id'] for a in t['added_tokens']}
-          for k in ('</s>', '<unk>', '<pad>', 'rus_Cyrl', 'eng_Latn', 'kat_Geor'):
-              assert k in added, f"нет токена {k}"
-          print('vocab:', len(vocab), '| rus_Cyrl =', added['rus_Cyrl'], '| eng_Latn =', added['eng_Latn'], '| kat_Geor =', added['kat_Geor'])
-          PY
 
           # Контроль: имена входов/выходов моделей должны совпасть с тем, что ждёт приложение
           pip install --quiet onnx
