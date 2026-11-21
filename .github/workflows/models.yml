@@ -1,0 +1,109 @@
+name: Publish models
+
+# Запускается вручную один раз (и при смене моделей): скачивает модели распознавания и перевода (NLLB)
+# и выкладывает их файлами в релиз `models`. Из этого релиза приложение скачивает их
+# само после установки, поэтому сам APK получается маленьким.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Whisper model (tiny / base / small)"
+        default: "small"
+        type: choice
+        options: [tiny, base, small]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      MODEL: ${{ inputs.model || 'small' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download models
+        run: |
+          set -e
+          mkdir -p out /tmp/giga /tmp/omni
+
+          # Whisper + Silero VAD
+          HF=https://huggingface.co/csukuangfj/sherpa-onnx-whisper-$MODEL/resolve/main
+          curl -fL --retry 3 -o out/whisper-encoder.int8.onnx $HF/$MODEL-encoder.int8.onnx
+          curl -fL --retry 3 -o out/whisper-decoder.int8.onnx $HF/$MODEL-decoder.int8.onnx
+          curl -fL --retry 3 -o out/whisper-tokens.txt $HF/$MODEL-tokens.txt
+          curl -fL --retry 3 -o out/silero_vad.onnx \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
+
+          # GigaAM (русский)
+          N=sherpa-onnx-nemo-ctc-giga-am-v2-russian-2025-04-19
+          curl -fL --retry 3 -o /tmp/giga/g.tar.bz2 \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$N.tar.bz2
+          tar xjf /tmp/giga/g.tar.bz2 -C /tmp/giga
+          cp /tmp/giga/$N/model.int8.onnx out/gigaam-model.int8.onnx
+          cp /tmp/giga/$N/tokens.txt out/gigaam-tokens.txt
+
+          # Omnilingual (грузинский)
+          N=sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12
+          curl -fL --retry 3 -o /tmp/omni/o.tar.bz2 \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$N.tar.bz2
+          tar xjf /tmp/omni/o.tar.bz2 -C /tmp/omni
+          cp /tmp/omni/$N/model.int8.onnx out/omni-model.int8.onnx
+          cp /tmp/omni/$N/tokens.txt out/omni-tokens.txt
+
+          # Vosk (ключевые фразы): zip-файлы как есть, приложение распакует их само
+          curl -fL --retry 3 -o out/vosk-ru.zip https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
+          curl -fL --retry 3 -o out/vosk-en.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+
+          # NLLB-200 distilled 600M (перевод), int8 ONNX от Xenova
+          NL=https://huggingface.co/Xenova/nllb-200-distilled-600M/resolve/main
+          curl -fL --retry 3 -o out/nllb-encoder.int8.onnx $NL/onnx/encoder_model_quantized.onnx
+          curl -fL --retry 3 -o out/nllb-decoder.int8.onnx $NL/onnx/decoder_model_merged_quantized.onnx
+          curl -fL --retry 3 -o /tmp/tokenizer.json $NL/tokenizer.json
+          python3 - <<'PY'
+          import json
+          t = json.load(open('/tmp/tokenizer.json', encoding='utf-8'))
+          vocab = t['model']['vocab']          # [[токен, оценка], ...]; номер строки = id токена
+          def clean(s): return s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
+          with open('out/nllb-vocab.tsv', 'w', encoding='utf-8', newline='\n') as f:
+              for piece, score in vocab:
+                  f.write(f"{score}\t{clean(piece)}\n")
+          with open('out/nllb-added.tsv', 'w', encoding='utf-8', newline='\n') as f:
+              for a in t['added_tokens']:
+                  f.write(f"{a['id']}\t{clean(a['content'])}\n")
+          added = {a['content']: a['id'] for a in t['added_tokens']}
+          for k in ('</s>', '<unk>', '<pad>', 'rus_Cyrl', 'eng_Latn', 'kat_Geor'):
+              assert k in added, f"нет токена {k}"
+          print('vocab:', len(vocab), '| rus_Cyrl =', added['rus_Cyrl'], '| eng_Latn =', added['eng_Latn'], '| kat_Geor =', added['kat_Geor'])
+          PY
+
+          # Контроль: имена входов/выходов моделей должны совпасть с тем, что ждёт приложение
+          pip install --quiet onnx
+          python3 - <<'PY'
+          import onnx
+          for n in ('encoder', 'decoder'):
+              m = onnx.load(f'out/nllb-{n}.int8.onnx', load_external_data=False)
+              ins = [i.name for i in m.graph.input]
+              outs = [o.name for o in m.graph.output]
+              print(n, 'inputs :', ins[:8], '... всего', len(ins))
+              print(n, 'outputs:', outs[:6], '... всего', len(outs))
+              if n == 'decoder':
+                  need = {'input_ids', 'encoder_hidden_states', 'encoder_attention_mask'}
+                  assert need <= set(ins), f"в декодере нет входов: {need - set(ins)}"
+                  assert 'logits' in outs, 'в декодере нет выхода logits'
+                  assert any(i.startswith('past_key_values.') for i in ins), 'нет past_key_values.*'
+          PY
+
+          ls -lh out
+
+      - name: Publish release "models"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          gh release delete models --yes --cleanup-tag || true
+          gh release create models out/* --target "$GITHUB_SHA" \
+            --title "Speech models" \
+            --notes "Модели (Whisper $MODEL, GigaAM, Omnilingual, Vosk, NLLB-200 600M). Приложение скачивает их само." \
+            --prerelease

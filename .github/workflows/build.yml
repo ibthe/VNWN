@@ -1,0 +1,71 @@
+name: Build VNWN APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # публикация APK в Releases
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      - name: Download sherpa-onnx library (AAR)
+        run: |
+          set -e
+          mkdir -p app/libs
+          curl -fL --retry 3 -o app/libs/sherpa-onnx.aar \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar
+          ls -lh app/libs
+
+      # NLLB работает через ONNX Runtime. В sherpa-onnx уже лежит свой libonnxruntime.so,
+      # поэтому берём onnxruntime-android ТОЙ ЖЕ версии: тогда обе библиотеки совместимы.
+      - name: Detect ONNX Runtime version bundled in sherpa-onnx
+        id: ort
+        run: |
+          set -e
+          mkdir -p /tmp/aar && cd /tmp/aar
+          unzip -q -o "$GITHUB_WORKSPACE/app/libs/sherpa-onnx.aar" 'jni/arm64-v8a/*'
+          ls -l jni/arm64-v8a
+          VER=$(strings -n 5 jni/arm64-v8a/libonnxruntime.so | grep -oE '^1\.[0-9]{2}\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ -z "$VER" ]; then VER=1.23.0; echo "::warning::версия ONNX Runtime не найдена, беру $VER"; fi
+          echo "ONNX Runtime в sherpa-onnx: $VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: 8.9
+
+      # Модели в APK не входят: приложение скачивает их после установки
+      # (релиз `models`, его создаёт workflow "Publish models").
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon -PortVersion=${{ steps.ort.outputs.version }}
+
+      - name: Publish APK to Release (tag "latest")
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -n 1)
+          cp "$APK" VNWN-debug.apk
+          SIZE=$(stat -c %s VNWN-debug.apk)
+          SHA=$(sha256sum VNWN-debug.apk | cut -d' ' -f1)
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest VNWN-debug.apk --target "$GITHUB_SHA" \
+            --title "VNWN (Voice Notes Wolf + NLLB) - latest debug build" \
+            --notes "Автосборка из ${GITHUB_SHA::7}. Размер: $SIZE байт. SHA-256: $SHA" \
+            --prerelease

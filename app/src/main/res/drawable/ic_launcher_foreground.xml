@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- уменьшаем, чтобы уши не обрезались круглой маской -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.82"
+        android:scaleY="0.82">
+
+        <!-- голова волка: уши, щёки-клочья, острая морда. Глаз нет -->
+        <path
+            android:pathData="M54,34 L44,31 L28,21 L26,46 L21,58 L30,60 L27,72 L40,72 L54,88 L68,72 L81,72 L78,60 L87,58 L82,46 L80,21 L64,31 Z"
+            android:strokeColor="#88FFD27C"
+            android:strokeLineJoin="round"
+            android:strokeWidth="1.2">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:startX="54"
+                    android:startY="21"
+                    android:endX="54"
+                    android:endY="88"
+                    android:type="linear">
+                    <item android:color="#FFFFD27C" android:offset="0.0" />
+                    <item android:color="#FFFF8A3D" android:offset="0.5" />
+                    <item android:color="#FFE5484D" android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- светлая грань на левой половине -->
+        <path
+            android:fillColor="#26FFFFFF"
+            android:pathData="M54,34 L44,31 L28,21 L26,46 L21,58 L30,60 L27,72 L40,72 L54,88 Z" />
+
+        <!-- внутренняя часть ушей -->
+        <path
+            android:fillColor="#99300F08"
+            android:pathData="M30,28 L39,33 L29,41 Z M78,28 L69,33 L79,41 Z" />
+
+        <!-- микрофон вместо морды: капсула, дуга, стойка, основание -->
+        <path
+            android:fillColor="#F2260A06"
+            android:pathData="M49,43 a5,5 0 0 1 10,0 V53 a5,5 0 0 1 -10,0 Z
+                              M43,51 h3 a8,8 0 0 0 16,0 h3 a11,11 0 0 1 -22,0 Z
+                              M52.5,62 h3 v8 h-3 Z
+                              M48,70 h12 v3 h-12 Z" />
+
+        <!-- прорези решётки микрофона -->
+        <path
+            android:fillColor="#CCFFD27C"
+            android:pathData="M50.5,43.5 H57.5 V44.7 H50.5 Z M50.5,47.5 H57.5 V48.7 H50.5 Z M50.5,51.5 H57.5 V52.7 H50.5 Z" />
+
+        <!-- значок перевода: тёмный круг с янтарной обводкой и двумя стрелками -->
+        <path
+            android:fillColor="#FF0E0604"
+            android:strokeColor="#FFFFB74D"
+            android:strokeWidth="1.4"
+            android:pathData="M63,78 a11,11 0 1 0 22,0 a11,11 0 1 0 -22,0 Z" />
+        <path
+            android:fillColor="#FFFFD27C"
+            android:pathData="M68,73.8 H77 V71.8 L81,74.5 L77,77.2 V75.2 H68 Z
+                              M80,80.8 H71 V78.8 L67,81.5 L71,84.2 V82.2 H80 Z" />
+    </group>
+</vector>
