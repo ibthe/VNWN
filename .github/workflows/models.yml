@@ -33,17 +33,37 @@ jobs:
           curl -fL --retry 3 -o /tmp/tokenizer.json $NL/tokenizer.json
           curl -fL --retry 3 -o /tmp/spm.model \
             https://huggingface.co/facebook/nllb-200-distilled-600M/resolve/main/sentencepiece.bpe.model
-          pip install --quiet --break-system-packages sentencepiece protobuf
+          pip install --quiet --break-system-packages sentencepiece
           python3 - <<'PY'
           import json
           from sentencepiece import SentencePieceProcessor
-          from sentencepiece import sentencepiece_model_pb2 as pb
           t = json.load(open('/tmp/tokenizer.json', encoding='utf-8'))
           vocab = t['model']['vocab']
           sp = SentencePieceProcessor(model_file='/tmp/spm.model')
-          mp = pb.ModelProto()
-          mp.ParseFromString(open('/tmp/spm.model', 'rb').read())
-          mt = mp.trainer_spec.model_type   # 1 = Unigram, 2 = BPE
+          def varint(b, i):
+              r = 0; sh = 0
+              while True:
+                  c = b[i]; i += 1
+                  r |= (c & 0x7f) << sh; sh += 7
+                  if not c & 0x80: return r, i
+          def fields(b):
+              i = 0
+              while i < len(b):
+                  tag, i = varint(b, i); f, w = tag >> 3, tag & 7
+                  if w == 0: v, i = varint(b, i); yield f, v
+                  elif w == 1: i += 8
+                  elif w == 5: i += 4
+                  elif w == 2:
+                      n, i = varint(b, i); yield f, b[i:i + n]; i += n
+                  else: raise ValueError('неизвестный wire type')
+          # model_type лежит в trainer_spec (поле 2 модели), номер поля 3: 1 = Unigram, 2 = BPE.
+          # Разбираем protobuf вручную, чтобы не зависеть от версии пакета protobuf в системе.
+          mt = 1
+          for f, v in fields(open('/tmp/spm.model', 'rb').read()):
+              if f == 2 and isinstance(v, (bytes, bytearray)):
+                  for f2, v2 in fields(v):
+                      if f2 == 3 and isinstance(v2, int): mt = v2
+                  break
           print('tokenizer.json:', t['model'].get('type'), '| spm model_type:', mt, '(1=Unigram, 2=BPE) | токенов spm:', sp.get_piece_size())
           def clean(x): return x.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
           # id в HF = id в spm + 1 (сдвиг fairseq); первые четыре: <s> <pad> </s> <unk>
