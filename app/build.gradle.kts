@@ -34,7 +34,7 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
     packaging {
-        // libonnxruntime.so есть и в sherpa-onnx, и в onnxruntime-android (версии совпадают)
+        // libonnxruntime.so есть и в sherpa-onnx, и в onnxruntime-android: берём ту, что лежит в jniLibs приложения
         jniLibs.pickFirsts += listOf("**/libonnxruntime.so")
     }
 }
@@ -52,8 +52,9 @@ dependencies {
     implementation(files("libs/sherpa-onnx.aar"))
 
     // Перевод текста на устройстве: NLLB-200 (distilled 600M) через ONNX Runtime.
-    // Версия подбирается под libonnxruntime.so из sherpa-onnx (см. build.yml), чтобы не было конфликта.
-    val ortVersion = (project.findProperty("ortVersion") as String?) ?: "1.23.0"
+    // Java-часть намеренно СТАРШЕ, чем libonnxruntime.so из sherpa-onnx (её копия единственная в APK,
+    // см. build.yml): новая библиотека поддерживает старый API, а наоборот не работает.
+    val ortVersion = (project.findProperty("ortVersion") as String?) ?: "1.20.0"
     implementation("com.microsoft.onnxruntime:onnxruntime-android:$ortVersion")
 
     // Распознавание ключевых фраз (JNA подтягивается автоматически)

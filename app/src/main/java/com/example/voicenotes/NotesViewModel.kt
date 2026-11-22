@@ -18,6 +18,7 @@ import com.example.voicenotes.speech.ModelStore
 import com.example.voicenotes.speech.WhisperRecognizer
 import com.example.voicenotes.translate.NllbNotInstalledException
 import com.example.voicenotes.translate.TextTranslator
+import com.example.voicenotes.translate.describeChain
 import com.example.voicenotes.wake.WakeConfig
 import com.example.voicenotes.wake.WakeWordService
 import com.example.voicenotes.wake.WakeWordState
@@ -582,7 +583,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
                     notice = if (t is NllbNotInstalledException) {
                         (t.message ?: "") + " Вставлен исходный текст."
                     } else {
-                        "Перевод не удался: ${t.message ?: t.javaClass.simpleName}. Вставлен исходный текст."
+                        "Перевод не удался: ${t.describeChain()}. Вставлен исходный текст."
                     }
                     text
                 }

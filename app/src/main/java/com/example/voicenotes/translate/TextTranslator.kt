@@ -26,6 +26,19 @@ import java.nio.LongBuffer
 class NllbNotInstalledException :
     Exception("Модель перевода не скачана: меню → «Модели распознавания» → «Перевод (NLLB-200, 600M)»")
 
+/** Цепочка «Класс: сообщение ← причина», чтобы по тосту было видно, что именно сломалось. */
+fun Throwable.describeChain(): String {
+    val parts = ArrayList<String>()
+    var t: Throwable? = this
+    var depth = 0
+    while (t != null && depth < 4) {
+        parts.add(t.javaClass.simpleName + (t.message?.let { ": $it" } ?: ""))
+        t = t.cause
+        depth++
+    }
+    return parts.joinToString(" ← ")
+}
+
 /**
  * Перевод текста на устройстве моделью NLLB-200 (distilled, 600M, int8) через ONNX Runtime.
  * Текст никуда не отправляется. Языки: "ru", "en", "ka", перевод идёт напрямую между любой парой.
@@ -78,6 +91,11 @@ class TextTranslator(modelsRoot: File) {
                         lines.add(lead + out.joinToString(" "))
                     }
                     lines.joinToString("\n")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    android.util.Log.e("NLLB", "translate failed", t)
+                    throw t
                 } finally {
                     scheduleUnload()
                 }

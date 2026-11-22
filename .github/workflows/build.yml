@@ -31,39 +31,23 @@ jobs:
             https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar
           ls -lh app/libs
 
-      # NLLB работает через ONNX Runtime. В sherpa-onnx уже лежит свой libonnxruntime.so,
-      # поэтому берём onnxruntime-android ТОЙ ЖЕ версии: тогда обе библиотеки совместимы.
-      - name: Detect ONNX Runtime version bundled in sherpa-onnx
-        id: ort
+      # NLLB работает через ONNX Runtime, а в sherpa-onnx уже лежит свой (новый, собранный из
+      # исходников) libonnxruntime.so. В APK должна попасть ровно ОДНА копия, и это должна быть
+      # копия sherpa: она новее, и с ней работают и sherpa (его JNI требует свежий API), и
+      # Java-часть ONNX Runtime (она старше и поэтому совместима). Кладём её в jniLibs
+      # приложения: библиотеки самого приложения Gradle выбирает в первую очередь.
+      - name: Use sherpa-onnx libonnxruntime.so as the single ONNX Runtime
         run: |
           set -e
           mkdir -p /tmp/aar && cd /tmp/aar
           unzip -q -o "$GITHUB_WORKSPACE/app/libs/sherpa-onnx.aar" 'jni/arm64-v8a/*'
-          SO=jni/arm64-v8a/libonnxruntime.so
-          exists() {
-            curl -fsI "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$1/onnxruntime-android-$1.pom" > /dev/null
-          }
-
-          echo "--- строки сборки ONNX Runtime (для диагностики):"
-          strings -n 6 "$SO" | grep -E 'ORT Build Info|git-branch=|git-commit-id=' | head -5 || true
-
-          VER=""
-          # 1) надёжный способ: ветка релиза из информации о сборке, например git-branch=rel-1.23.2
-          CAND=$(strings -n 6 "$SO" | grep -oE 'git-branch=rel-[0-9]+\.[0-9]+\.[0-9]+' | sed 's/.*rel-//' | head -1 || true)
-          if [ -n "$CAND" ] && exists "$CAND"; then VER="$CAND"; fi
-
-          # 2) запасной: строки вида 1.NN.N, берём самую новую из тех, что реально есть на Maven Central
-          if [ -z "$VER" ]; then
-            for C in $(strings -n 5 "$SO" | grep -oE '^1\.[0-9]{2}\.[0-9]+$' | sort -Vu | sort -Vr); do
-              echo "кандидат: $C"
-              if exists "$C"; then VER="$C"; break; fi
-            done
-          fi
-
-          # 3) совсем запасной вариант
-          if [ -z "$VER" ]; then VER=1.23.0; echo "::warning::версия ONNX Runtime не определена, беру $VER"; fi
-          echo "Будет использован onnxruntime-android $VER"
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          ls -l jni/arm64-v8a
+          echo "--- сведения о libonnxruntime.so из sherpa-onnx:"
+          strings -n 6 jni/arm64-v8a/libonnxruntime.so | grep -E 'ORT Build Info|git-branch=|git-commit-id=' | head -5 || true
+          strings -n 5 jni/arm64-v8a/libonnxruntime.so | grep -E '^1\.[0-9]{2}\.[0-9]+$' | sort -Vu | head || true
+          mkdir -p "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          cp jni/arm64-v8a/libonnxruntime.so "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libonnxruntime.so"
+          sha256sum jni/arm64-v8a/libonnxruntime.so
 
       - uses: gradle/actions/setup-gradle@v5
         with:
@@ -72,7 +56,20 @@ jobs:
       # Модели в APK не входят: приложение скачивает их после установки
       # (релиз `models`, его создаёт workflow "Publish models").
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon -PortVersion=${{ steps.ort.outputs.version }}
+        run: gradle assembleDebug --no-daemon
+
+      - name: Verify the APK carries the sherpa libonnxruntime.so
+        run: |
+          set -e
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -n 1)
+          mkdir -p /tmp/apk && cd /tmp/apk
+          unzip -q -o "$GITHUB_WORKSPACE/$APK" 'lib/arm64-v8a/*'
+          ls -l lib/arm64-v8a | grep -E 'onnxruntime|sherpa' || true
+          A=$(sha256sum lib/arm64-v8a/libonnxruntime.so | cut -d' ' -f1)
+          B=$(sha256sum /tmp/aar/jni/arm64-v8a/libonnxruntime.so | cut -d' ' -f1)
+          echo "в APK:    $A"
+          echo "у sherpa: $B"
+          test "$A" = "$B" || { echo "::error::в APK попала другая libonnxruntime.so, не из sherpa-onnx"; exit 1; }
 
       - name: Publish APK to Release (tag "latest")
         if: github.event_name != 'pull_request'

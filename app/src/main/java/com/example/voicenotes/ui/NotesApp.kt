@@ -76,6 +76,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import com.example.voicenotes.NotesViewModel
+import com.example.voicenotes.translate.describeChain
 import com.example.voicenotes.data.Note
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -646,7 +647,7 @@ private fun NoteEditor(vm: NotesViewModel, id: Long, onClose: () -> Unit) {
                 Toast.makeText(
                     context,
                     if (t is com.example.voicenotes.translate.NllbNotInstalledException) t.message ?: ""
-                    else "Перевод не удался: ${t.message ?: t.javaClass.simpleName}",
+                    else "Перевод не удался: ${t.describeChain()}",
                     Toast.LENGTH_LONG
                 ).show()
             } finally {
