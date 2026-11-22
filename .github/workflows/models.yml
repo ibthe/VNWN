@@ -31,34 +31,36 @@ jobs:
           # NLLB: словарь токенизатора готовим первым (быстро), чтобы сбой был виден сразу
           NL=https://huggingface.co/Xenova/nllb-200-distilled-600M/resolve/main
           curl -fL --retry 3 -o /tmp/tokenizer.json $NL/tokenizer.json
+          curl -fL --retry 3 -o /tmp/spm.model \
+            https://huggingface.co/facebook/nllb-200-distilled-600M/resolve/main/sentencepiece.bpe.model
+          pip install --quiet --break-system-packages sentencepiece protobuf
           python3 - <<'PY'
-          import json, sys, subprocess, urllib.request
+          import json
+          from sentencepiece import SentencePieceProcessor
+          from sentencepiece import sentencepiece_model_pb2 as pb
           t = json.load(open('/tmp/tokenizer.json', encoding='utf-8'))
-          m = t['model']
-          v = m['vocab']
-          print('тип модели:', m.get('type'), '| словарь:', type(v).__name__, '| размер:', len(v))
-          print('первые элементы:', (v[:3] if isinstance(v, list) else list(v.items())[:3]))
+          vocab = t['model']['vocab']
+          sp = SentencePieceProcessor(model_file='/tmp/spm.model')
+          mp = pb.ModelProto()
+          mp.ParseFromString(open('/tmp/spm.model', 'rb').read())
+          mt = mp.trainer_spec.model_type   # 1 = Unigram, 2 = BPE
+          print('tokenizer.json:', t['model'].get('type'), '| spm model_type:', mt, '(1=Unigram, 2=BPE) | токенов spm:', sp.get_piece_size())
           def clean(x): return x.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
-          if isinstance(v, list) and v and isinstance(v[0], (list, tuple)) and len(v[0]) >= 2 and isinstance(v[0][1], (int, float)):
-              rows = [(clean(str(e[0])), float(e[1])) for e in v]
-              print('источник словаря: tokenizer.json')
-          else:
-              # запасной путь: оригинальная модель SentencePiece от Meta, оценки берём из неё
-              print('источник словаря: sentencepiece.bpe.model')
-              subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'sentencepiece'])
-              urllib.request.urlretrieve(
-                  'https://huggingface.co/facebook/nllb-200-distilled-600M/resolve/main/sentencepiece.bpe.model',
-                  '/tmp/spm.model')
-              import sentencepiece as spm
-              sp = spm.SentencePieceProcessor(model_file='/tmp/spm.model')
-              # id в HF = id в spm + 1 (сдвиг fairseq); первые четыре: <s> <pad> </s> <unk>
-              rows = [('<s>', 0.0), ('<pad>', 0.0), ('</s>', 0.0), ('<unk>', 0.0)]
-              for i in range(3, sp.get_piece_size()):
-                  rows.append((clean(sp.id_to_piece(i)), float(sp.get_score(i))))
+          # id в HF = id в spm + 1 (сдвиг fairseq); первые четыре: <s> <pad> </s> <unk>
+          rows = [('<s>', 0.0), ('<pad>', 0.0), ('</s>', 0.0), ('<unk>', 0.0)]
+          for i in range(3, sp.get_piece_size()):
+              rows.append((clean(sp.id_to_piece(i)), float(sp.get_score(i))))
+          # сверка нумерации с tokenizer.json (если там словарь токен -> id)
+          if isinstance(vocab, dict):
+              bad = [(k, v) for k, v in vocab.items() if 4 <= v < len(rows) and rows[v][0] != clean(k)]
+              print('расхождений нумерации:', len(bad), bad[:5])
+              assert len(bad) < len(rows) * 0.001, 'нумерация spm и tokenizer.json не совпадает'
           with open('out/nllb-vocab.tsv', 'w', encoding='utf-8', newline='\n') as f:
               for piece, score in rows:
                   f.write(f"{score}\t{piece}\n")
           with open('out/nllb-added.tsv', 'w', encoding='utf-8', newline='\n') as f:
+              if mt == 2:
+                  f.write("-1\t#bpe\n")      # приложение выберет алгоритм BPE вместо Unigram
               for a in t['added_tokens']:
                   f.write(f"{a['id']}\t{clean(a['content'])}\n")
           added = {a['content']: a['id'] for a in t['added_tokens']}

@@ -6,7 +6,7 @@ import java.text.Normalizer
 /**
  * Токенизатор NLLB-200: SentencePiece Unigram (поиск лучшей разбивки алгоритмом Витерби).
  *
- * Читает два компактных файла, которые делает workflow «Publish models» из tokenizer.json:
+ * Поддерживает оба варианта SentencePiece (Unigram и BPE). Читает два компактных файла, которые делает workflow «Publish models» из tokenizer.json:
  *  - vocab.tsv: строка N = токен с id N, формат «оценка<TAB>токен»;
  *  - added.tsv: «id<TAB>токен» для служебных токенов и кодов языков (rus_Cyrl, eng_Latn, kat_Geor…).
  *
@@ -19,6 +19,9 @@ class NllbTokenizer(dir: File) {
     private val specials = HashMap<String, Int>()
     private var maxPieceLen = 1
     private val unkScore: Float
+
+    /** true, если в SentencePiece-модели использован BPE (метка «#bpe» в added.tsv), иначе Unigram. */
+    private val bpe: Boolean
 
     val eosId: Int
     val unkId: Int
@@ -59,6 +62,7 @@ class NllbTokenizer(dir: File) {
                 specials[line.substring(tab + 1)] = id
             }
         }
+        bpe = specials.containsKey("#bpe")
         eosId = specials["</s>"] ?: 2
         unkId = specials["<unk>"] ?: 3
         padId = specials["<pad>"] ?: 1
@@ -84,8 +88,33 @@ class NllbTokenizer(dir: File) {
         return out.toIntArray()
     }
 
+    /** BPE как в SentencePiece: пока можно, сливаем соседнюю пару с наибольшей оценкой. */
+    private fun encodeWordBpe(word: String, out: MutableList<Int>) {
+        val sym = ArrayList<String>()
+        var i = 0
+        while (i < word.length) {
+            val n = if (Character.isHighSurrogate(word[i]) && i + 1 < word.length) 2 else 1
+            sym.add(word.substring(i, i + n))
+            i += n
+        }
+        while (sym.size > 1) {
+            var bestIdx = -1
+            var bestScore = Float.NEGATIVE_INFINITY
+            for (j in 0 until sym.size - 1) {
+                val id = pieceToId[sym[j] + sym[j + 1]] ?: continue
+                val sc = scores[id]
+                if (sc > bestScore) { bestScore = sc; bestIdx = j }
+            }
+            if (bestIdx < 0) break
+            sym[bestIdx] = sym[bestIdx] + sym[bestIdx + 1]
+            sym.removeAt(bestIdx + 1)
+        }
+        for (x in sym) out.add(pieceToId[x] ?: unkId)
+    }
+
     /** Лучшая разбивка одного слова (с ведущим «▁») по оценкам словаря. */
     private fun encodeWord(word: String, out: MutableList<Int>) {
+        if (bpe) { encodeWordBpe(word, out); return }
         val n = word.length
         val best = FloatArray(n + 1) { Float.NEGATIVE_INFINITY }
         val from = IntArray(n + 1) { -1 }
