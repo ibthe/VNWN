@@ -31,23 +31,46 @@ jobs:
             https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar
           ls -lh app/libs
 
-      # NLLB работает через ONNX Runtime, а в sherpa-onnx уже лежит свой (новый, собранный из
-      # исходников) libonnxruntime.so. В APK должна попасть ровно ОДНА копия, и это должна быть
-      # копия sherpa: она новее, и с ней работают и sherpa (его JNI требует свежий API), и
-      # Java-часть ONNX Runtime (она старше и поэтому совместима). Кладём её в jniLibs
-      # приложения: библиотеки самого приложения Gradle выбирает в первую очередь.
-      - name: Use sherpa-onnx libonnxruntime.so as the single ONNX Runtime
+      # В sherpa-onnx лежит свой libonnxruntime.so, собранный так, что символ OrtGetApiBase из него
+      # недоступен (на телефоне: «cannot locate symbol OrtGetApiBase»). Java-части ONNX Runtime он
+      # не подходит. Поэтому для NLLB берём ОФИЦИАЛЬНЫЙ onnxruntime-android и кладём его
+      # библиотеку под другим именем (libort_nllb.so), чтобы она жила рядом с библиотекой sherpa,
+      # не конфликтуя с ней. Родной libonnxruntime.so от sherpa остаётся нетронутым.
+      - name: Prepare ONNX Runtime for NLLB (separate copy, renamed)
+        env:
+          ORT_VERSION: "1.23.0"
         run: |
           set -e
-          mkdir -p /tmp/aar && cd /tmp/aar
-          unzip -q -o "$GITHUB_WORKSPACE/app/libs/sherpa-onnx.aar" 'jni/arm64-v8a/*'
+          sudo apt-get install -y --no-install-recommends patchelf > /dev/null
+          mkdir -p /tmp/ort /tmp/aar app/libs "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          curl -fL --retry 3 -o /tmp/ort/ort.aar \
+            "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$ORT_VERSION/onnxruntime-android-$ORT_VERSION.aar"
+          cd /tmp/ort
+          unzip -q -o ort.aar classes.jar 'jni/arm64-v8a/*'
           ls -l jni/arm64-v8a
-          echo "--- сведения о libonnxruntime.so из sherpa-onnx:"
-          strings -n 6 jni/arm64-v8a/libonnxruntime.so | grep -E 'ORT Build Info|git-branch=|git-commit-id=' | head -5 || true
-          strings -n 5 jni/arm64-v8a/libonnxruntime.so | grep -E '^1\.[0-9]{2}\.[0-9]+$' | sort -Vu | head || true
-          mkdir -p "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-          cp jni/arm64-v8a/libonnxruntime.so "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libonnxruntime.so"
-          sha256sum jni/arm64-v8a/libonnxruntime.so
+          cp classes.jar "$GITHUB_WORKSPACE/app/libs/ort-classes.jar"
+
+          # переименовываем официальную библиотеку и перенаправляем на неё JNI-обёртку
+          cp jni/arm64-v8a/libonnxruntime.so libort_nllb.so
+          patchelf --set-soname libort_nllb.so libort_nllb.so
+          cp jni/arm64-v8a/libonnxruntime4j_jni.so libonnxruntime4j_jni.so
+          patchelf --replace-needed libonnxruntime.so libort_nllb.so libonnxruntime4j_jni.so
+          echo "--- зависимости JNI-обёртки после правки:"
+          readelf -d libonnxruntime4j_jni.so | grep -E 'NEEDED|SONAME' || true
+          echo "--- экспорт OrtGetApiBase в libort_nllb.so:"
+          readelf -Ws --dyn-syms libort_nllb.so | grep OrtGetApiBase
+
+          J="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          cp libort_nllb.so libonnxruntime4j_jni.so "$J/"
+
+          # библиотеку sherpa-onnx кладём как есть (она нужна распознаванию речи)
+          cd /tmp/aar
+          unzip -q -o "$GITHUB_WORKSPACE/app/libs/sherpa-onnx.aar" 'jni/arm64-v8a/*'
+          echo "--- libonnxruntime.so из sherpa-onnx (для информации):"
+          strings -n 6 jni/arm64-v8a/libonnxruntime.so | grep -E 'ORT Build Info|git-branch=' | head -3 || true
+          readelf -Ws --dyn-syms jni/arm64-v8a/libonnxruntime.so | grep -c OrtGetApiBase || echo "в библиотеке sherpa OrtGetApiBase нет"
+          cp jni/arm64-v8a/libonnxruntime.so "$J/libonnxruntime.so"
+          ls -l "$J"
 
       - uses: gradle/actions/setup-gradle@v5
         with:
@@ -58,18 +81,24 @@ jobs:
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
 
-      - name: Verify the APK carries the sherpa libonnxruntime.so
+      - name: Verify native libraries in the APK
         run: |
           set -e
           APK=$(ls app/build/outputs/apk/debug/*.apk | head -n 1)
           mkdir -p /tmp/apk && cd /tmp/apk
           unzip -q -o "$GITHUB_WORKSPACE/$APK" 'lib/arm64-v8a/*'
-          ls -l lib/arm64-v8a | grep -E 'onnxruntime|sherpa' || true
-          A=$(sha256sum lib/arm64-v8a/libonnxruntime.so | cut -d' ' -f1)
-          B=$(sha256sum /tmp/aar/jni/arm64-v8a/libonnxruntime.so | cut -d' ' -f1)
-          echo "в APK:    $A"
-          echo "у sherpa: $B"
-          test "$A" = "$B" || { echo "::error::в APK попала другая libonnxruntime.so, не из sherpa-onnx"; exit 1; }
+          ls -l lib/arm64-v8a | grep -E 'onnx|ort_nllb|sherpa' || true
+          J="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          for f in libort_nllb.so libonnxruntime4j_jni.so libonnxruntime.so; do
+            A=$(sha256sum "lib/arm64-v8a/$f" | cut -d' ' -f1)
+            B=$(sha256sum "$J/$f" | cut -d' ' -f1)
+            echo "$f  APK=$A  ожидалось=$B"
+            test "$A" = "$B" || { echo "::error::в APK попал не тот файл $f"; exit 1; }
+          done
+          readelf -d lib/arm64-v8a/libonnxruntime4j_jni.so | grep NEEDED
+          if readelf -d lib/arm64-v8a/libonnxruntime4j_jni.so | grep -q 'libonnxruntime.so'; then
+            echo "::error::JNI-обёртка всё ещё зависит от libonnxruntime.so"; exit 1
+          fi
 
       - name: Publish APK to Release (tag "latest")
         if: github.event_name != 'pull_request'
