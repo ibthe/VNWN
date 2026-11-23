@@ -84,6 +84,9 @@ fun diagnoseOrt(context: android.content.Context, t: Throwable?): String {
  * Перевод текста на устройстве моделью NLLB-200 (distilled, 600M, int8) через ONNX Runtime.
  * Текст никуда не отправляется. Языки: "ru", "en", "ka", перевод идёт напрямую между любой парой.
  *
+ * Качество: перед переводом текст чистится и режется на короткие фразы ([TextPreprocessor]),
+ * декодирование идёт лучевым поиском (beam search), а не жадным.
+ *
  * Модель тяжёлая (около 1 ГБ в памяти), поэтому грузится при первом переводе
  * и выгружается из памяти после [IDLE_UNLOAD_MS] простоя.
  */
@@ -106,7 +109,8 @@ class TextTranslator(modelsRoot: File) {
         .all { File(dir, it).let { f -> f.isFile && f.length() > 0 } }
 
     /**
-     * Переводит текст построчно (абзацы и пустые строки сохраняются), внутри строки — по предложениям.
+     * Переводит текст построчно (абзацы и пустые строки сохраняются). Каждая строка очищается,
+     * делится на предложения, длинные предложения ещё и на фразы.
      * Параметр [online] оставлен для совместимости со старым кодом и игнорируется: всё работает офлайн.
      */
     @Suppress("UNUSED_PARAMETER")
@@ -124,12 +128,20 @@ class TextTranslator(modelsRoot: File) {
                         ensureActive()
                         if (line.isBlank()) { lines.add(line); continue }
                         val lead = line.takeWhile { it == ' ' || it == '\t' }
-                        val out = ArrayList<String>()
-                        for (sentence in splitSentences(line.trim())) {
+                        val cleaned = TextPreprocessor.clean(line, from)
+                        if (cleaned.isEmpty()) { lines.add(line); continue }
+                        val out = StringBuilder()
+                        for (chunk in TextPreprocessor.split(cleaned)) {
                             ensureActive()
-                            out.add(translateSentence(sentence, src, dst))
+                            var piece = translateSentence(chunk.text, src, dst)
+                            if (chunk.continues) {
+                                // фраза из середины предложения: вместо точки в конце ставим запятую/«;»
+                                piece = piece.trimEnd('.', '!', '?', '…', ',', ';', ':', ' ') + chunk.separator
+                            }
+                            if (out.isNotEmpty()) out.append(' ')
+                            out.append(piece)
                         }
-                        lines.add(lead + out.joinToString(" "))
+                        lines.add(lead + out.toString())
                     }
                     lines.joinToString("\n")
                 } catch (e: CancellationException) {
@@ -142,25 +154,6 @@ class TextTranslator(modelsRoot: File) {
                 }
             }
         }
-    }
-
-    private fun splitSentences(line: String): List<String> {
-        val parts = line.split(Regex("(?<=[.!?…])\\s+")).filter { it.isNotBlank() }
-        // слишком длинные предложения режем по запятым, чтобы не терять качество
-        val out = ArrayList<String>()
-        for (p in parts) {
-            if (p.length <= 400) { out.add(p); continue }
-            var cur = StringBuilder()
-            for (piece in p.split(Regex("(?<=[,;:])\\s+"))) {
-                if (cur.isNotEmpty() && cur.length + piece.length + 1 > 300) {
-                    out.add(cur.toString()); cur = StringBuilder()
-                }
-                if (cur.isNotEmpty()) cur.append(' ')
-                cur.append(piece)
-            }
-            if (cur.isNotEmpty()) out.add(cur.toString())
-        }
-        return out
     }
 
     private fun scheduleUnload() {
@@ -206,15 +199,40 @@ class TextTranslator(modelsRoot: File) {
         tokenizer = null
     }
 
-    private fun emptyFloatTensor(env: OrtEnvironment, shape: LongArray): OnnxTensor {
-        val buf = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder()).asFloatBuffer()
-        return OnnxTensor.createTensor(env, buf, shape)
-    }
+    private fun directFloats(n: Int): FloatBuffer =
+        ByteBuffer.allocateDirect(n * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+
+    private fun emptyFloatTensor(env: OrtEnvironment, shape: LongArray): OnnxTensor =
+        OnnxTensor.createTensor(env, directFloats(0), shape)
 
     private fun longTensor(env: OrtEnvironment, values: IntArray, shape: LongArray): OnnxTensor =
         OnnxTensor.createTensor(env, LongBuffer.wrap(LongArray(values.size) { values[it].toLong() }), shape)
 
-    /** Одно предложение: энкодер, затем жадное декодирование с кэшем ключей/значений. */
+    /** Новый тензор [лучи, ...] из строк старого тензора с номерами [src] (перестановка лучей в кэше). */
+    private fun reorderBeams(env: OrtEnvironment, t: OnnxTensor, src: IntArray): OnnxTensor {
+        val shape = t.info.shape                       // [лучи, головы, длина, размер головы]
+        val per = (shape[1] * shape[2] * shape[3]).toInt()
+        val from = t.floatBuffer
+        val out = directFloats(src.size * per)
+        val tmp = FloatArray(per)
+        for (i in src.indices) {
+            from.position(src[i] * per)
+            from.get(tmp)
+            out.put(tmp)
+        }
+        out.rewind()
+        val newShape = shape.clone().also { it[0] = src.size.toLong() }
+        return OnnxTensor.createTensor(env, out, newShape)
+    }
+
+    private class Beam(val tokens: ArrayList<Int>, val score: Float)
+    private class Finished(val tokens: List<Int>, val norm: Float)
+
+    /**
+     * Одно предложение: энкодер, затем лучевой поиск ([BEAM_SIZE] лучей) с кэшем ключей/значений.
+     * Применяются штраф за повторы ([REPETITION_PENALTY]), запрет повторов триграмм
+     * и нормализация оценки по длине ([LENGTH_PENALTY]).
+     */
     private suspend fun translateSentence(sentence: String, srcLang: String, dstLang: String): String {
         val tok = tokenizer!!
         val env = env!!
@@ -224,37 +242,66 @@ class TextTranslator(modelsRoot: File) {
         val srcIds = tok.encode(sentence, srcLang)
         val tgtLangId = tok.langId(dstLang)
         val maxNew = (srcIds.size * 2 + 16).coerceAtMost(256)
+        val nb = BEAM_SIZE
+        val topK = nb * 2
+        val limit = tok.firstSpecialId
 
         val toClose = ArrayList<AutoCloseable>()
-        var firstResult: OrtSession.Result? = null   // из него берутся ключи/значения энкодера
-        var prevResult: OrtSession.Result? = null    // из него берутся ключи/значения декодера
+        var firstResult: OrtSession.Result? = null     // из него берутся ключи/значения энкодера
+        var lastResult: OrtSession.Result? = null
+        var pastTensors: List<OnnxTensor> = emptyList() // кэш декодера после перестановки лучей
         try {
-            val srcShape = longArrayOf(1, srcIds.size.toLong())
-            val inputIds = longTensor(env, srcIds, srcShape).also { toClose.add(it) }
-            val encMask = longTensor(env, IntArray(srcIds.size) { 1 }, srcShape).also { toClose.add(it) }
+            val srcLen = srcIds.size
+            val encResult = enc.run(
+                mapOf(
+                    "input_ids" to longTensor(env, srcIds, longArrayOf(1, srcLen.toLong())).also { toClose.add(it) },
+                    "attention_mask" to longTensor(env, IntArray(srcLen) { 1 }, longArrayOf(1, srcLen.toLong())).also { toClose.add(it) }
+                )
+            ).also { toClose.add(it) }
+            val hidden1 = encResult.get(0) as OnnxTensor
+            val dModel = hidden1.info.shape[2].toInt()
 
-            val encResult = enc.run(mapOf("input_ids" to inputIds, "attention_mask" to encMask))
+            // выход энкодера копируем на все лучи
+            val hiddenArr = FloatArray(srcLen * dModel)
+            hidden1.floatBuffer.also { it.rewind() }.get(hiddenArr)
+            val rep = directFloats(nb * srcLen * dModel)
+            repeat(nb) { rep.put(hiddenArr) }
+            rep.rewind()
+            val encHidden = OnnxTensor.createTensor(env, rep, longArrayOf(nb.toLong(), srcLen.toLong(), dModel.toLong()))
                 .also { toClose.add(it) }
-            val encHidden = encResult.get(0) as OnnxTensor
+            val encMask = longTensor(env, IntArray(nb * srcLen) { 1 }, longArrayOf(nb.toLong(), srcLen.toLong()))
+                .also { toClose.add(it) }
 
             val decInputNames = dec.inputNames
             val emptyPast = HashMap<String, OnnxTensor>()
             for (n in decInputNames) {
                 if (!n.startsWith("past_key_values.")) continue
-                emptyPast[n] = emptyFloatTensor(env, longArrayOf(1, heads.toLong(), 0, headDim.toLong()))
+                emptyPast[n] = emptyFloatTensor(env, longArrayOf(nb.toLong(), heads.toLong(), 0, headDim.toLong()))
                     .also { toClose.add(it) }
             }
 
-            val generated = ArrayList<Int>()
-            // декодер начинается с </s>, затем принудительно ставим код языка перевода
-            var feed = intArrayOf(tok.eosId, tgtLangId)
-            val seen = HashMap<Long, MutableSet<Int>>()  // запрет повторов триграмм
+            var beams = ArrayList<Beam>()
+            for (i in 0 until nb) beams.add(Beam(ArrayList(), if (i == 0) 0f else Float.NEGATIVE_INFINITY))
+            val finished = ArrayList<Finished>()
+            val row = FloatArray(limit)
+            val topVal = FloatArray(topK)
+            val topIdx = IntArray(topK)
+            var pastMap = HashMap<String, OnnxTensor>()
 
             for (step in 0 until maxNew) {
                 currentCoroutineContext().ensureActive()
                 val useCache = step > 0
                 val extra = ArrayList<OnnxTensor>()
-                val ids = longTensor(env, feed, longArrayOf(1, feed.size.toLong())).also { extra.add(it) }
+
+                // вход декодера: на первом шаге [</s>, код языка], дальше последний токен каждого луча
+                val feedLen = if (useCache) 1 else 2
+                val feed = IntArray(nb * feedLen)
+                for (b in 0 until nb) {
+                    if (useCache) feed[b] = beams[b].tokens.last()
+                    else { feed[b * 2] = tok.eosId; feed[b * 2 + 1] = tgtLangId }
+                }
+                val ids = longTensor(env, feed, longArrayOf(nb.toLong(), feedLen.toLong())).also { extra.add(it) }
+
                 val inputs = HashMap<String, OnnxTensor>()
                 for (name in decInputNames) {
                     when {
@@ -268,11 +315,10 @@ class TextTranslator(modelsRoot: File) {
                         }
                         name.startsWith("past_key_values.") -> {
                             val key = name.removePrefix("past_key_values.")
-                            inputs[name] = if (!useCache) {
-                                emptyPast.getValue(name)
-                            } else {
-                                val holder = if (key.contains(".encoder.")) firstResult!! else prevResult!!
-                                holder.get("present.$key").get() as OnnxTensor
+                            inputs[name] = when {
+                                !useCache -> emptyPast.getValue(name)
+                                key.contains(".encoder.") -> firstResult!!.get("present.$key").get() as OnnxTensor
+                                else -> pastMap.getValue(key)
                             }
                         }
                     }
@@ -283,61 +329,126 @@ class TextTranslator(modelsRoot: File) {
                 } finally {
                     extra.forEach { runCatching { it.close() } }
                 }
+                if (step == 0) firstResult = result
+                lastResult = result
+                // кэш прошлого шага использован: освобождаем
+                pastTensors.forEach { runCatching { it.close() } }
+                pastTensors = emptyList()
 
                 val logitsT = result.get("logits").get() as OnnxTensor
-                val shape = logitsT.info.shape            // [1, seq, vocab]
-                val vocab = shape[2].toInt()
-                val seq = shape[1].toInt()
-                val next = pickToken(logitsT.floatBuffer, (seq - 1) * vocab, vocab, tok, generated, seen)
+                val lshape = logitsT.info.shape            // [лучи, длина, словарь]
+                val seq = lshape[1].toInt()
+                val vocab = lshape[2].toInt()
+                val lbuf = logitsT.floatBuffer
+                val n = minOf(limit, vocab)
 
-                if (step == 0) {
-                    firstResult = result
-                } else if (prevResult !== firstResult) {
-                    runCatching { prevResult?.close() }
-                }
-                prevResult = result
+                // кандидаты: (луч, токен, суммарная оценка)
+                val candBeam = ArrayList<Int>()
+                val candTok = ArrayList<Int>()
+                val candScore = ArrayList<Float>()
+                for (b in 0 until nb) {
+                    val beam = beams[b]
+                    if (beam.score == Float.NEGATIVE_INFINITY) continue
+                    lbuf.position((b * seq + (seq - 1)) * vocab)
+                    lbuf.get(row, 0, n)
 
-                if (next == tok.eosId) break
-                generated.add(next)
-                if (generated.size >= 3) {
-                    val n = generated.size
-                    val k = (generated[n - 3].toLong() shl 32) or generated[n - 2].toLong()
-                    seen.getOrPut(k) { HashSet() }.add(generated[n - 1])
+                    // служебные токены запрещены; </s> разрешён, когда уже что-то переведено
+                    for (i in 0 until 4) if (i != tok.eosId) row[i] = Float.NEGATIVE_INFINITY
+                    if (beam.tokens.isEmpty()) row[tok.eosId] = Float.NEGATIVE_INFINITY
+                    // штраф за повтор уже использованных токенов
+                    if (REPETITION_PENALTY != 1f) {
+                        for (t in beam.tokens.toSet()) {
+                            if (t < n && row[t] != Float.NEGATIVE_INFINITY) {
+                                row[t] = if (row[t] < 0) row[t] * REPETITION_PENALTY else row[t] / REPETITION_PENALTY
+                            }
+                        }
+                    }
+                    // запрет повтора триграмм
+                    val tk = beam.tokens
+                    if (tk.size >= 2) {
+                        val a = tk[tk.size - 2]; val c = tk[tk.size - 1]
+                        for (i in 0 until tk.size - 2) {
+                            if (tk[i] == a && tk[i + 1] == c && tk[i + 2] < n) row[tk[i + 2]] = Float.NEGATIVE_INFINITY
+                        }
+                    }
+
+                    // log-softmax и лучшие topK токенов за один просмотр словаря
+                    var mx = Float.NEGATIVE_INFINITY
+                    for (i in 0 until n) if (row[i] > mx) mx = row[i]
+                    var sum = 0.0
+                    java.util.Arrays.fill(topVal, Float.NEGATIVE_INFINITY)
+                    for (i in 0 until n) {
+                        val v = row[i]
+                        if (v == Float.NEGATIVE_INFINITY) continue
+                        sum += Math.exp((v - mx).toDouble())
+                        if (v > topVal[topK - 1]) {
+                            var j = topK - 1
+                            while (j > 0 && topVal[j - 1] < v) { topVal[j] = topVal[j - 1]; topIdx[j] = topIdx[j - 1]; j-- }
+                            topVal[j] = v; topIdx[j] = i
+                        }
+                    }
+                    val lse = mx + Math.log(sum).toFloat()
+                    for (j in 0 until topK) {
+                        if (topVal[j] == Float.NEGATIVE_INFINITY) break
+                        candBeam.add(b); candTok.add(topIdx[j]); candScore.add(beam.score + (topVal[j] - lse))
+                    }
                 }
-                feed = intArrayOf(next)
+
+                val order = candScore.indices.sortedByDescending { candScore[it] }
+                val next = ArrayList<Beam>()
+                val srcBeam = ArrayList<Int>()
+                for ((rank, ci) in order.withIndex()) {
+                    val b = candBeam[ci]; val t = candTok[ci]; val sc = candScore[ci]
+                    if (t == tok.eosId) {
+                        if (rank >= nb) continue           // </s> учитывается только среди лучших nb
+                        val len = beams[b].tokens.size.coerceAtLeast(1)
+                        finished.add(Finished(ArrayList(beams[b].tokens), sc / Math.pow(len.toDouble(), LENGTH_PENALTY.toDouble()).toFloat()))
+                    } else {
+                        next.add(Beam(ArrayList(beams[b].tokens).also { it.add(t) }, sc))
+                        srcBeam.add(b)
+                    }
+                    if (next.size == nb) break
+                }
+                finished.sortByDescending { it.norm }
+                while (finished.size > nb) finished.removeAt(finished.size - 1)
+
+                if (next.isEmpty()) break
+                val curLen = next[0].tokens.size
+                val bestAlive = next.maxOf { it.score } / Math.pow(curLen.toDouble(), LENGTH_PENALTY.toDouble()).toFloat()
+                if (finished.size >= nb && bestAlive <= finished.last().norm) break
+
+                // дополняем до nb лучей (если кандидатов не хватило) и переставляем кэш под новые лучи
+                while (next.size < nb) { next.add(Beam(ArrayList(next[0].tokens), Float.NEGATIVE_INFINITY)); srcBeam.add(srcBeam[0]) }
+                beams = next
+                val srcArr = srcBeam.toIntArray()
+                val newPast = ArrayList<OnnxTensor>()
+                val newMap = HashMap<String, OnnxTensor>()
+                for (name in decInputNames) {
+                    if (!name.startsWith("past_key_values.")) continue
+                    val key = name.removePrefix("past_key_values.")
+                    if (key.contains(".encoder.")) continue
+                    val t = reorderBeams(env, result.get("present.$key").get() as OnnxTensor, srcArr)
+                    newPast.add(t); newMap[key] = t
+                }
+                pastTensors = newPast
+                pastMap = newMap
+                if (lastResult !== firstResult) runCatching { lastResult?.close() }
             }
-            return tok.decode(generated)
+
+            // если ни один луч не закончился сам, берём лучший из живых
+            if (finished.isEmpty()) {
+                for (b in beams) if (b.score != Float.NEGATIVE_INFINITY && b.tokens.isNotEmpty()) {
+                    finished.add(Finished(b.tokens, b.score / Math.pow(b.tokens.size.toDouble(), LENGTH_PENALTY.toDouble()).toFloat()))
+                }
+                finished.sortByDescending { it.norm }
+            }
+            return tok.decode(finished.firstOrNull()?.tokens ?: emptyList())
         } finally {
-            if (prevResult !== firstResult) runCatching { prevResult?.close() }
+            pastTensors.forEach { runCatching { it.close() } }
+            if (lastResult !== firstResult) runCatching { lastResult?.close() }
             runCatching { firstResult?.close() }
             toClose.asReversed().forEach { runCatching { it.close() } }
         }
-    }
-
-    /** Жадный выбор с запретом служебных токенов и повтора уже встречавшихся триграмм. */
-    private fun pickToken(
-        buf: FloatBuffer, base: Int, vocab: Int, tok: NllbTokenizer,
-        generated: List<Int>, seen: Map<Long, Set<Int>>
-    ): Int {
-        val banned: Set<Int>? = if (generated.size >= 2) {
-            val n = generated.size
-            seen[(generated[n - 2].toLong() shl 32) or generated[n - 1].toLong()]
-        } else null
-        val allowEos = generated.isNotEmpty()
-        var best = -1
-        var bestV = Float.NEGATIVE_INFINITY
-        val limit = minOf(vocab, tok.firstSpecialId)
-        for (i in 0 until limit) {
-            if (i == tok.eosId) {
-                if (!allowEos) continue
-            } else if (i < 4) {
-                continue
-            }
-            if (banned != null && i in banned) continue
-            val v = buf.get(base + i)
-            if (v > bestV) { bestV = v; best = i }
-        }
-        return if (best < 0) tok.eosId else best
     }
 
     fun close() {
@@ -347,6 +458,13 @@ class TextTranslator(modelsRoot: File) {
 
     companion object {
         private const val IDLE_UNLOAD_MS = 90_000L
+
+        /** Число лучей поиска. Больше — точнее, но медленнее (1 = жадный поиск). */
+        private const val BEAM_SIZE = 4
+        /** Оценка делится на (длина в токенах)^LENGTH_PENALTY; >1 поощряет более длинные переводы. */
+        private const val LENGTH_PENALTY = 1.0f
+        /** Штраф за повтор токена; 1.0 — выключен. Слишком большой портит имена и служебные слова. */
+        private const val REPETITION_PENALTY = 1.1f
 
         /** Язык по преобладающему письму: грузинский, русский (кириллица) или английский. */
         fun detect(text: String): String {
