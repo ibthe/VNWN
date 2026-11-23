@@ -212,6 +212,7 @@ private fun NotesList(
     }
 
     if (showModels) ModelsDialog(vm, onClose = { showModels = false })
+    vm.diagReport?.let { DiagnosticsDialog(it, onClose = { vm.closeDiagnostics() }) }
     if (showDeleteAll) DeleteAllDialog(
         count = notes.size,
         onConfirm = {
@@ -254,6 +255,10 @@ private fun NotesList(
                             MenuRow("Модели распознавания") {
                                 menuOpen = false
                                 showModels = true
+                            }
+                            MenuRow("Диагностика перевода") {
+                                menuOpen = false
+                                vm.runTranslateDiagnostics()
                             }
                             MenuRow("Голосовой запуск") {
                                 menuOpen = false
@@ -644,12 +649,11 @@ private fun NoteEditor(vm: NotesViewModel, id: Long, onClose: () -> Unit) {
             } catch (t: kotlinx.coroutines.CancellationException) {
                 throw t
             } catch (t: Throwable) {
-                Toast.makeText(
-                    context,
-                    if (t is com.example.voicenotes.translate.NllbNotInstalledException) t.message ?: ""
-                    else "Перевод не удался: ${t.describeChain()}",
-                    Toast.LENGTH_LONG
-                ).show()
+                if (t is com.example.voicenotes.translate.NllbNotInstalledException) {
+                    Toast.makeText(context, t.message ?: "", Toast.LENGTH_LONG).show()
+                } else {
+                    vm.showTranslateError(t)
+                }
             } finally {
                 translatingText = false
             }
@@ -1370,4 +1374,47 @@ private fun VoicePanel(vm: NotesViewModel, onDictate: () -> Unit, onOk: () -> Un
             Text("ОК", color = cs.onSecondaryContainer, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
         }
     }
+}
+
+
+/** Отчёт о работе перевода: текст можно выделить, скопировать или отправить (Telegram, почта, заметки…). */
+@Composable
+private fun DiagnosticsDialog(text: String, onClose: () -> Unit) {
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Диагностика перевода") },
+        text = {
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Text(
+                    text,
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                )
+            }
+        },
+        confirmButton = {
+            Row {
+                TextButton(onClick = {
+                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("VNWN diagnostics", text))
+                    Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
+                }) { Text("Копировать") }
+                TextButton(onClick = {
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(android.content.Intent.EXTRA_SUBJECT, "VNWN: диагностика перевода")
+                        putExtra(android.content.Intent.EXTRA_TEXT, text)
+                    }
+                    context.startActivity(android.content.Intent.createChooser(send, "Отправить отчёт"))
+                }) { Text("Отправить") }
+            }
+        },
+        dismissButton = { TextButton(onClick = onClose) { Text("Закрыть") } }
+    )
 }

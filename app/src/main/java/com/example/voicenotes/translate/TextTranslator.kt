@@ -40,6 +40,47 @@ fun Throwable.describeChain(): String {
 }
 
 /**
+ * Подробный отчёт о сбое перевода: цепочка ошибок, стек, наличие классов и библиотек ONNX Runtime.
+ * Показывается в окне с кнопкой «Копировать», чтобы его можно было прислать целиком.
+ */
+fun diagnoseOrt(context: android.content.Context, t: Throwable?): String {
+    val sb = StringBuilder()
+    if (t != null) sb.appendLine("ОШИБКА: ${t.describeChain()}")
+    var cur: Throwable? = t
+    var level = 0
+    while (cur != null && level < 3) {
+        sb.appendLine("-- стек (уровень $level, ${cur.javaClass.name}):")
+        cur.stackTrace.take(8).forEach { sb.appendLine("   at $it") }
+        cur = cur.cause
+        level++
+    }
+    val cl = TextTranslator::class.java.classLoader
+    sb.appendLine("-- классы:")
+    for (name in listOf("ai.onnxruntime.OrtEnvironment", "ai.onnxruntime.OnnxRuntime",
+        "ai.onnxruntime.OrtSession", "ai.onnxruntime.OnnxTensor", "ai.onnxruntime.OrtException")) {
+        val r = try {
+            Class.forName(name, false, cl); "есть"
+        } catch (e: Throwable) { "НЕТ: ${e.javaClass.simpleName}: ${e.message}" }
+        sb.appendLine("   $name: $r")
+    }
+    val init = try {
+        Class.forName("ai.onnxruntime.OnnxRuntime", true, cl); "ок"
+    } catch (e: Throwable) { e.describeChain() }
+    sb.appendLine("   инициализация OnnxRuntime: $init")
+    sb.appendLine("-- нативные библиотеки:")
+    for (lib in listOf("onnxruntime", "onnxruntime4j_jni")) {
+        val r = try { System.loadLibrary(lib); "загружена" } catch (e: Throwable) { e.describeChain() }
+        sb.appendLine("   $lib: $r")
+    }
+    val dir = java.io.File(context.applicationInfo.nativeLibraryDir)
+    val files = dir.listFiles()?.filter { it.name.contains("onnx") || it.name.contains("sherpa") }
+    sb.appendLine("-- ${dir.path}:")
+    if (files.isNullOrEmpty()) sb.appendLine("   (нет файлов onnx/sherpa; возможно, библиотеки не распакованы)")
+    else files.sortedBy { it.name }.forEach { sb.appendLine("   ${it.name} ${it.length() / 1024} КБ") }
+    return sb.toString()
+}
+
+/**
  * Перевод текста на устройстве моделью NLLB-200 (distilled, 600M, int8) через ONNX Runtime.
  * Текст никуда не отправляется. Языки: "ru", "en", "ka", перевод идёт напрямую между любой парой.
  *

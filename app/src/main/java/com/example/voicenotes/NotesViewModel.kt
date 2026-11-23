@@ -146,6 +146,81 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         private set
     private val translator = TextTranslator(modelsRoot)
 
+    // ---- Диагностика перевода: полный отчёт, который можно выделить, скопировать и отправить
+    var diagReport by mutableStateOf<String?>(null)
+        private set
+    private val lastErrorFile = java.io.File(modelsRoot, "nllb-last-error.txt")
+
+    fun closeDiagnostics() { diagReport = null }
+
+    private fun header(): String {
+        val app = getApplication<Application>()
+        val am = app.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        val ver = runCatching {
+            app.packageManager.getPackageInfo(app.packageName, 0).versionName
+        }.getOrNull()
+        return buildString {
+            appendLine("VNWN ${ver ?: "?"} | ${app.packageName}")
+            appendLine("Устройство: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})")
+            appendLine("ABI: ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
+            appendLine("ОЗУ свободно: ${mi.availMem / 1048576} МБ из ${mi.totalMem / 1048576} МБ")
+            appendLine("Куча приложения: макс. ${Runtime.getRuntime().maxMemory() / 1048576} МБ")
+            val dir = java.io.File(modelsRoot, "models/nllb")
+            appendLine("-- файлы модели NLLB (${dir.path}):")
+            val files = dir.listFiles()
+            if (files.isNullOrEmpty()) appendLine("   (пусто, модель не скачана)")
+            else files.sortedBy { it.name }.forEach { appendLine("   ${it.name} ${"%.1f".format(it.length() / 1048576.0)} МБ") }
+        }
+    }
+
+    /** Показать отчёт о сбое перевода (и сохранить его, чтобы он был виден в меню «Диагностика перевода»). */
+    fun showTranslateError(t: Throwable) {
+        viewModelScope.launch {
+            val report = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val r = header() + com.example.voicenotes.translate.diagnoseOrt(getApplication(), t)
+                runCatching { lastErrorFile.writeText(r) }
+                r
+            }
+            android.util.Log.e("NLLB", report)
+            diagReport = report
+        }
+    }
+
+    /** Меню «Диагностика перевода»: проверка окружения и пробный перевод. */
+    fun runTranslateDiagnostics() {
+        viewModelScope.launch {
+            diagReport = "Идёт проверка… (первая загрузка модели может занять до минуты)"
+            val report = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val sb = StringBuilder(header())
+                sb.append(com.example.voicenotes.translate.diagnoseOrt(getApplication(), null))
+                sb.appendLine("-- пробный перевод «Привет, как дела?» (ru → en):")
+                val t0 = System.currentTimeMillis()
+                try {
+                    val out = translator.translate("Привет, как дела?", "ru", "en")
+                    sb.appendLine("   результат: «$out» за ${System.currentTimeMillis() - t0} мс")
+                } catch (t: Throwable) {
+                    sb.appendLine("   ОШИБКА: ${t.describeChain()}")
+                    var c: Throwable? = t
+                    var lvl = 0
+                    while (c != null && lvl < 3) {
+                        sb.appendLine("   -- стек (уровень $lvl, ${c.javaClass.name}):")
+                        c.stackTrace.take(10).forEach { sb.appendLine("      at $it") }
+                        c = c.cause; lvl++
+                    }
+                }
+                val last = runCatching { lastErrorFile.readText() }.getOrNull()
+                if (!last.isNullOrBlank()) {
+                    sb.appendLine("-- последняя сохранённая ошибка:")
+                    sb.appendLine(last)
+                }
+                sb.toString()
+            }
+            android.util.Log.i("NLLB", report)
+            diagReport = report
+        }
+    }
+
     private val recorder = AudioRecorder(viewModelScope) { level = it }
     private var timerJob: Job? = null
 
@@ -580,10 +655,13 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (e: CancellationException) {
                     throw e
                 } catch (t: Throwable) {
+                    if (t !is NllbNotInstalledException) {
+                        runCatching { lastErrorFile.writeText(header() + com.example.voicenotes.translate.diagnoseOrt(getApplication(), t)) }
+                    }
                     notice = if (t is NllbNotInstalledException) {
                         (t.message ?: "") + " Вставлен исходный текст."
                     } else {
-                        "Перевод не удался: ${t.describeChain()}. Вставлен исходный текст."
+                        "Перевод не удался: ${t.describeChain()}. Вставлен исходный текст. Подробности: меню → «Диагностика перевода»."
                     }
                     text
                 }
