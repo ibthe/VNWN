@@ -297,17 +297,17 @@ private val WolfGold = Color(0xFFFFD27C)
 private val WolfOrange = Color(0xFFFF8A3D)
 private val WolfRed = Color(0xFFE5484D)
 
-/** Название приложения: заглавными, с разрядкой; «WOLF» в градиенте иконки. */
+/** Название приложения: «VNW-N» в градиенте иконки, над ним расшифровка. */
 @Composable
 fun AppTitle() {
     val cs = MaterialTheme.colorScheme
     Column {
         Text(
-            "VOICE NOTES", fontSize = 11.sp, letterSpacing = 5.sp,
+            "VOICE NOTES WOLF", fontSize = 11.sp, letterSpacing = 3.sp,
             fontWeight = FontWeight.Medium, color = cs.onSurfaceVariant
         )
         Text(
-            "WOLF",
+            "VNW-N",
             style = TextStyle(
                 brush = Brush.linearGradient(listOf(WolfGold, WolfOrange, WolfRed)),
                 fontSize = 28.sp, fontWeight = FontWeight.Black, letterSpacing = 9.sp

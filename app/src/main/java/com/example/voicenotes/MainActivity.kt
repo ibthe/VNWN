@@ -104,7 +104,7 @@ class MainActivity : FragmentActivity() {
             }
         )
         val info = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Voice Notes Wolf")
+            .setTitle("VNW-N")
             .setSubtitle("Подтвердите, что это вы")
             .setAllowedAuthenticators(LOCK_AUTH)
             .build()

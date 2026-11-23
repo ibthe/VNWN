@@ -1,6 +1,6 @@
 <resources>
-    <string name="app_name">VN Wolf NLLB</string>
-    <string name="tile_label">Диктовка NLLB</string>
+    <string name="app_name">VNW-N</string>
+    <string name="tile_label">Диктовка VNW-N</string>
     <string name="shortcut_dictate">Диктовать</string>
     <string name="shortcut_dictate_long">Новая голосовая заметка</string>
 </resources>

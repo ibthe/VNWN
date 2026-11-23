@@ -246,7 +246,7 @@ private fun NotesList(
                             }
                             MenuRow("Сохранить копию в файл") {
                                 menuOpen = false
-                                exportLauncher.launch("vnwn-backup.json")
+                                exportLauncher.launch("vnw-n-backup.json")
                             }
                             MenuRow("Восстановить из файла") {
                                 menuOpen = false
@@ -1402,13 +1402,13 @@ private fun DiagnosticsDialog(text: String, onClose: () -> Unit) {
                 TextButton(onClick = {
                     val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
                         as android.content.ClipboardManager
-                    cm.setPrimaryClip(android.content.ClipData.newPlainText("VNWN diagnostics", text))
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("VNW-N diagnostics", text))
                     Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
                 }) { Text("Копировать") }
                 TextButton(onClick = {
                     val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(android.content.Intent.EXTRA_SUBJECT, "VNWN: диагностика перевода")
+                        putExtra(android.content.Intent.EXTRA_SUBJECT, "VNW-N: диагностика перевода")
                         putExtra(android.content.Intent.EXTRA_TEXT, text)
                     }
                     context.startActivity(android.content.Intent.createChooser(send, "Отправить отчёт"))

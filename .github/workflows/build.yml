@@ -112,6 +112,6 @@ jobs:
           SHA=$(sha256sum VNWN-debug.apk | cut -d' ' -f1)
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest VNWN-debug.apk --target "$GITHUB_SHA" \
-            --title "VNWN (Voice Notes Wolf + NLLB) - latest debug build" \
+            --title "VNW-N (Voice Notes Wolf + NLLB) - latest debug build" \
             --notes "Автосборка из ${GITHUB_SHA::7}. Размер: $SIZE байт. SHA-256: $SHA" \
             --prerelease

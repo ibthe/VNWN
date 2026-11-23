@@ -1,11 +1,11 @@
-# VNWN — Voice Notes Wolf + NLLB (Android)
+# VNW-N — Voice Notes Wolf + NLLB (Android)
 
 Отдельное приложение на базе [Voice Notes Wolf](https://github.com/ibthe/Voice-Notes-Wolf).
 Единственное отличие: перевод текста выполняет **NLLB-200 distilled 600M** (int8, ONNX Runtime)
 прямо на телефоне, вместо Google ML Kit / Google Переводчика. Текст для перевода никуда не отправляется.
 
 Приложение ставится **рядом** с оригиналом: другой `applicationId` (`app.voicenoteswolf.nllb`),
-другое имя («VN Wolf NLLB»), другая иконка (оранжевый волк со значком перевода).
+другое имя («VNW-N»), другая иконка (оранжевый волк со значком перевода).
 Данные, настройки и модели у приложений раздельные.
 
 ## Сборка

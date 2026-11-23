@@ -161,7 +161,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
             app.packageManager.getPackageInfo(app.packageName, 0).versionName
         }.getOrNull()
         return buildString {
-            appendLine("VNWN ${ver ?: "?"} | ${app.packageName}")
+            appendLine("VNW-N ${ver ?: "?"} | ${app.packageName}")
             appendLine("Устройство: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})")
             appendLine("ABI: ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
             appendLine("ОЗУ свободно: ${mi.availMem / 1048576} МБ из ${mi.totalMem / 1048576} МБ")
