@@ -292,7 +292,12 @@ fun ThemeDialog(current: ThemeMode, onPick: (ThemeMode) -> Unit, onClose: () -> 
     )
 }
 
-/** Название приложения: заглавными, с разрядкой и градиентом акцентного цвета. */
+/** Цвета названия: те же, что у иконки приложения (янтарь → оранжевый → красный). */
+private val WolfGold = Color(0xFFFFD27C)
+private val WolfOrange = Color(0xFFFF8A3D)
+private val WolfRed = Color(0xFFE5484D)
+
+/** Название приложения: заглавными, с разрядкой; «WOLF» в градиенте иконки. */
 @Composable
 fun AppTitle() {
     val cs = MaterialTheme.colorScheme
@@ -304,7 +309,7 @@ fun AppTitle() {
         Text(
             "WOLF",
             style = TextStyle(
-                brush = Brush.linearGradient(listOf(cs.primary, lerp(cs.primary, cs.onBackground, 0.4f))),
+                brush = Brush.linearGradient(listOf(WolfGold, WolfOrange, WolfRed)),
                 fontSize = 28.sp, fontWeight = FontWeight.Black, letterSpacing = 9.sp
             )
         )
