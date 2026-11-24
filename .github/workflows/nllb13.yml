@@ -13,7 +13,7 @@ permissions:
 jobs:
   convert:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v5
 
@@ -24,6 +24,12 @@ jobs:
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          # 1.3B в fp32 при экспорте не помещается в 16 ГБ памяти раннера (прошлый запуск был убит), поэтому добавляем своп
+          sudo swapoff -a || true
+          sudo fallocate -l 40G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
           df -h /
           free -g
 
@@ -32,14 +38,19 @@ jobs:
           set -e
           pip install --quiet "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu
           pip install --quiet "optimum[onnxruntime]==1.23.3" "transformers==4.46.3" "onnx==1.17.0" \
-            "onnxruntime==1.20.1" sentencepiece protobuf "numpy<2"
-          pip list 2>/dev/null | grep -i -E "^(torch|optimum|transformers|onnx|onnxruntime|numpy) "
+            "onnxruntime==1.20.1" "accelerate==1.1.1" sentencepiece protobuf "numpy<2"
+          pip list 2>/dev/null | grep -i -E "^(torch|optimum|transformers|accelerate|onnx|onnxruntime|numpy) "
 
       - name: Export facebook/nllb-200-distilled-1.3B to ONNX
         run: |
           set -e
-          optimum-cli export onnx --model facebook/nllb-200-distilled-1.3B \
-            --task text2text-generation-with-past /tmp/onnx
+          # через Python API: без проверки против PyTorch (она держит в памяти ещё одну копию модели);
+          # результат всё равно проверяет пробный перевод ниже
+          python3 - <<'PY'
+          from optimum.exporters.onnx import main_export
+          main_export("facebook/nllb-200-distilled-1.3B", output="/tmp/onnx",
+                      task="text2text-generation-with-past", device="cpu", do_validation=False)
+          PY
           ls -lh /tmp/onnx
           # нужен только объединённый декодер; остальное и кэш загрузок удаляем ради места
           rm -f /tmp/onnx/decoder_model.onnx* /tmp/onnx/decoder_with_past_model.onnx*
