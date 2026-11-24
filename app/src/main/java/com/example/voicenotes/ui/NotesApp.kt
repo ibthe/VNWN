@@ -1276,7 +1276,7 @@ private fun TranslateModeChips(vm: NotesViewModel) {
         if (vm.isInstalled(com.example.voicenotes.speech.ModelPack.NLLB))
             "Перевод на устройстве (NLLB-200). Текст не покидает телефон."
         else
-            "Модель перевода не скачана: меню → «Модели распознавания» → «Перевод (NLLB-200, 600M)»."
+            "Модель перевода не скачана: меню → «Модели распознавания» → «Перевод (NLLB-200, 1.3B)»."
     )
 }
 

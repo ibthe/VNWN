@@ -1,6 +1,6 @@
 name: Publish models
 
-# Запускается вручную один раз (и при смене моделей): скачивает модели распознавания и перевода (NLLB)
+# Запускается вручную один раз (и при смене моделей): скачивает модели распознавания
 # и выкладывает их файлами в релиз `models`. Из этого релиза приложение скачивает их
 # само после установки, поэтому сам APK получается маленьким.
 on:
@@ -27,69 +27,6 @@ jobs:
         run: |
           set -e
           mkdir -p out /tmp/giga /tmp/omni
-
-          # NLLB: словарь токенизатора готовим первым (быстро), чтобы сбой был виден сразу
-          NL=https://huggingface.co/Xenova/nllb-200-distilled-600M/resolve/main
-          curl -fL --retry 3 -o /tmp/tokenizer.json $NL/tokenizer.json
-          curl -fL --retry 3 -o /tmp/spm.model \
-            https://huggingface.co/facebook/nllb-200-distilled-600M/resolve/main/sentencepiece.bpe.model
-          pip install --quiet --break-system-packages sentencepiece
-          python3 - <<'PY'
-          import json
-          from sentencepiece import SentencePieceProcessor
-          t = json.load(open('/tmp/tokenizer.json', encoding='utf-8'))
-          vocab = t['model']['vocab']
-          sp = SentencePieceProcessor(model_file='/tmp/spm.model')
-          def varint(b, i):
-              r = 0; sh = 0
-              while True:
-                  c = b[i]; i += 1
-                  r |= (c & 0x7f) << sh; sh += 7
-                  if not c & 0x80: return r, i
-          def fields(b):
-              i = 0
-              while i < len(b):
-                  tag, i = varint(b, i); f, w = tag >> 3, tag & 7
-                  if w == 0: v, i = varint(b, i); yield f, v
-                  elif w == 1: i += 8
-                  elif w == 5: i += 4
-                  elif w == 2:
-                      n, i = varint(b, i); yield f, b[i:i + n]; i += n
-                  else: raise ValueError('неизвестный wire type')
-          # model_type лежит в trainer_spec (поле 2 модели), номер поля 3: 1 = Unigram, 2 = BPE.
-          # Разбираем protobuf вручную, чтобы не зависеть от версии пакета protobuf в системе.
-          mt = 1
-          for f, v in fields(open('/tmp/spm.model', 'rb').read()):
-              if f == 2 and isinstance(v, (bytes, bytearray)):
-                  for f2, v2 in fields(v):
-                      if f2 == 3 and isinstance(v2, int): mt = v2
-                  break
-          print('tokenizer.json:', t['model'].get('type'), '| spm model_type:', mt, '(1=Unigram, 2=BPE) | токенов spm:', sp.get_piece_size())
-          def clean(x): return x.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
-          # id в HF = id в spm + 1 (сдвиг fairseq); первые четыре: <s> <pad> </s> <unk>
-          rows = [('<s>', 0.0), ('<pad>', 0.0), ('</s>', 0.0), ('<unk>', 0.0)]
-          for i in range(3, sp.get_piece_size()):
-              rows.append((clean(sp.id_to_piece(i)), float(sp.get_score(i))))
-          # сверка нумерации с tokenizer.json (если там словарь токен -> id)
-          if isinstance(vocab, dict):
-              bad = [(k, v) for k, v in vocab.items() if 4 <= v < len(rows) and rows[v][0] != clean(k)]
-              print('расхождений нумерации:', len(bad), bad[:5])
-              assert len(bad) < len(rows) * 0.001, 'нумерация spm и tokenizer.json не совпадает'
-          with open('out/nllb-vocab.tsv', 'w', encoding='utf-8', newline='\n') as f:
-              for piece, score in rows:
-                  f.write(f"{score}\t{piece}\n")
-          with open('out/nllb-added.tsv', 'w', encoding='utf-8', newline='\n') as f:
-              if mt == 2:
-                  f.write("-1\t#bpe\n")      # приложение выберет алгоритм BPE вместо Unigram
-              for a in t['added_tokens']:
-                  f.write(f"{a['id']}\t{clean(a['content'])}\n")
-          added = {a['content']: a['id'] for a in t['added_tokens']}
-          for k in ('</s>', '<unk>', '<pad>', 'rus_Cyrl', 'eng_Latn', 'kat_Geor'):
-              assert k in added, f"нет токена {k}"
-          print('токенов в словаре:', len(rows), '| rus_Cyrl =', added['rus_Cyrl'],
-                '| eng_Latn =', added['eng_Latn'], '| kat_Geor =', added['kat_Geor'])
-          assert len(rows) >= 256000, 'словарь слишком маленький'
-          PY
 
           # Whisper + Silero VAD
           HF=https://huggingface.co/csukuangfj/sherpa-onnx-whisper-$MODEL/resolve/main
@@ -119,27 +56,6 @@ jobs:
           curl -fL --retry 3 -o out/vosk-ru.zip https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
           curl -fL --retry 3 -o out/vosk-en.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
 
-          # NLLB-200 distilled 600M (перевод), int8 ONNX от Xenova
-          curl -fL --retry 3 -o out/nllb-encoder.int8.onnx $NL/onnx/encoder_model_quantized.onnx
-          curl -fL --retry 3 -o out/nllb-decoder.int8.onnx $NL/onnx/decoder_model_merged_quantized.onnx
-
-          # Контроль: имена входов/выходов моделей должны совпасть с тем, что ждёт приложение
-          pip install --quiet onnx
-          python3 - <<'PY'
-          import onnx
-          for n in ('encoder', 'decoder'):
-              m = onnx.load(f'out/nllb-{n}.int8.onnx', load_external_data=False)
-              ins = [i.name for i in m.graph.input]
-              outs = [o.name for o in m.graph.output]
-              print(n, 'inputs :', ins[:8], '... всего', len(ins))
-              print(n, 'outputs:', outs[:6], '... всего', len(outs))
-              if n == 'decoder':
-                  need = {'input_ids', 'encoder_hidden_states', 'encoder_attention_mask'}
-                  assert need <= set(ins), f"в декодере нет входов: {need - set(ins)}"
-                  assert 'logits' in outs, 'в декодере нет выхода logits'
-                  assert any(i.startswith('past_key_values.') for i in ins), 'нет past_key_values.*'
-          PY
-
           ls -lh out
 
       - name: Publish release "models"
@@ -150,5 +66,5 @@ jobs:
           gh release delete models --yes --cleanup-tag || true
           gh release create models out/* --target "$GITHUB_SHA" \
             --title "Speech models" \
-            --notes "Модели (Whisper $MODEL, GigaAM, Omnilingual, Vosk, NLLB-200 600M). Приложение скачивает их само." \
+            --notes "Модели распознавания (Whisper $MODEL, GigaAM, Omnilingual, Vosk). Приложение скачивает их само." \
             --prerelease

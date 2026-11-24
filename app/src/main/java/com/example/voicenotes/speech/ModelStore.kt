@@ -14,8 +14,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.zip.ZipInputStream
 
-/** Один файл модели: [remote] - имя в релизе `models`, [local] - путь внутри filesDir. */
-class ModelItem(val remote: String, val local: String, val unzip: Boolean = false)
+/** Один файл модели: [remote] - имя в релизе [release] (по умолчанию `models`), [local] - путь внутри filesDir. */
+class ModelItem(val remote: String, val local: String, val unzip: Boolean = false, val release: String = "models")
 
 private val VAD = ModelItem("silero_vad.onnx", "models/silero_vad.onnx")
 
@@ -47,12 +47,12 @@ enum class ModelPack(val title: String, val sizeMb: Int, val items: List<ModelIt
         )
     ),
     NLLB(
-        "Перевод (NLLB-200, 600M)", 900,
+        "Перевод (NLLB-200, 1.3B)", 1700,
         listOf(
-            ModelItem("nllb-encoder.int8.onnx", "models/nllb/encoder.int8.onnx"),
-            ModelItem("nllb-decoder.int8.onnx", "models/nllb/decoder.int8.onnx"),
-            ModelItem("nllb-vocab.tsv", "models/nllb/vocab.tsv"),
-            ModelItem("nllb-added.tsv", "models/nllb/added.tsv")
+            ModelItem("nllb13-encoder.int8.onnx", "models/nllb13/encoder.int8.onnx", release = "nllb"),
+            ModelItem("nllb13-decoder.int8.onnx", "models/nllb13/decoder.int8.onnx", release = "nllb"),
+            ModelItem("nllb13-vocab.tsv", "models/nllb13/vocab.tsv", release = "nllb"),
+            ModelItem("nllb13-added.tsv", "models/nllb13/added.tsv", release = "nllb")
         )
     ),
     WAKE_RU(
@@ -80,7 +80,7 @@ enum class ModelPack(val title: String, val sizeMb: Int, val items: List<ModelIt
  * Загрузка продолжается с того места, где оборвалась (файлы `.part`).
  */
 object ModelStore {
-    const val BASE_URL = "https://github.com/ibthe/VNWN/releases/download/models"
+    const val RELEASES = "https://github.com/ibthe/VNWN/releases/download"
 
     private class NotFound(message: String) : Exception(message)
 
@@ -126,7 +126,7 @@ object ModelStore {
         val target = File(root, item.local)
         val part = File(root, item.local + ".part")
         part.parentFile?.mkdirs()
-        httpGet("$BASE_URL/${item.remote}", part, report)
+        httpGet("$RELEASES/${item.release}/${item.remote}", part, report)
         target.delete()
         if (!part.renameTo(target)) throw IOException("не удалось сохранить ${item.local}")
     }
@@ -134,7 +134,7 @@ object ModelStore {
     private suspend fun fetchZip(root: File, item: ModelItem, report: (Long) -> Unit) {
         val zip = File(root, item.remote)
         val part = File(root, item.remote + ".part")
-        httpGet("$BASE_URL/${item.remote}", part, report)
+        httpGet("$RELEASES/${item.release}/${item.remote}", part, report)
         zip.delete()
         if (!part.renameTo(zip)) throw IOException("не удалось сохранить ${item.remote}")
 

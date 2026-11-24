@@ -1,4 +1,4 @@
-name: Build VNWN APK
+name: Build VNW-N APK
 
 on:
   push:

@@ -1,0 +1,113 @@
+name: Publish NLLB 1.3B
+
+# Запускается вручную один раз. Готовых int8-ONNX для nllb-200-distilled-1.3B нет, поэтому workflow
+# сам скачивает оригинал Meta, экспортирует его в ONNX и квантует в int8 (как это делает Xenova для 600M).
+# Результат выкладывается в отдельный релиз `nllb`, из него приложение скачивает модель.
+# Это долго (около часа) и тяжело по диску и памяти, но делается один раз.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+          free -g
+
+      - name: Install tools
+        run: |
+          set -e
+          pip install --quiet "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet "optimum[onnxruntime]==1.23.3" "transformers==4.46.3" "onnx==1.17.0" \
+            "onnxruntime==1.20.1" sentencepiece protobuf "numpy<2"
+          pip list 2>/dev/null | grep -i -E "^(torch|optimum|transformers|onnx|onnxruntime|numpy) "
+
+      - name: Export facebook/nllb-200-distilled-1.3B to ONNX
+        run: |
+          set -e
+          optimum-cli export onnx --model facebook/nllb-200-distilled-1.3B \
+            --task text2text-generation-with-past /tmp/onnx
+          ls -lh /tmp/onnx
+          # нужен только объединённый декодер; остальное и кэш загрузок удаляем ради места
+          rm -f /tmp/onnx/decoder_model.onnx* /tmp/onnx/decoder_with_past_model.onnx*
+          rm -rf ~/.cache/huggingface
+          df -h /
+
+      - name: Quantize to int8 and prepare vocabulary
+        run: |
+          set -e
+          mkdir -p out
+          python3 - <<'PY'
+          import os
+          from onnxruntime.quantization import quantize_dynamic, QuantType
+          for src, dst in (('encoder_model.onnx', 'nllb13-encoder.int8.onnx'),
+                           ('decoder_model_merged.onnx', 'nllb13-decoder.int8.onnx')):
+              print('квантование', src, flush=True)
+              quantize_dynamic('/tmp/onnx/' + src, 'out/' + dst, per_channel=True, reduce_range=True,
+                               weight_type=QuantType.QUInt8)
+              size = os.path.getsize('out/' + dst)
+              print(dst, round(size / 1048576), 'МБ', flush=True)
+              assert size < 2 * 1024**3, 'файл больше 2 ГБ: GitHub не примет его как файл релиза'
+          PY
+          python3 tools/nllb_vocab.py /tmp/onnx out nllb13
+          rm -rf /tmp/onnx/*.onnx_data /tmp/onnx/encoder_model.onnx /tmp/onnx/decoder_model_merged.onnx
+          ls -lh out
+
+      - name: Smoke test (quantized models must translate)
+        run: |
+          set -e
+          python3 - <<'PY'
+          import numpy as np, onnxruntime as ort
+          from transformers import AutoTokenizer
+          tok = AutoTokenizer.from_pretrained('/tmp/onnx', src_lang='rus_Cyrl')
+          opts = ort.SessionOptions()
+          enc = ort.InferenceSession('out/nllb13-encoder.int8.onnx', opts, providers=['CPUExecutionProvider'])
+          dec = ort.InferenceSession('out/nllb13-decoder.int8.onnx', opts, providers=['CPUExecutionProvider'])
+          print('вход энкодера :', [i.name for i in enc.get_inputs()])
+          print('входы декодера:', [i.name for i in dec.get_inputs()][:8], '… всего', len(dec.get_inputs()))
+          print('выходы декодера:', [o.name for o in dec.get_outputs()][:4], '… всего', len(dec.get_outputs()))
+          for text, tgt in (('Привет, как дела?', 'eng_Latn'),
+                            ('Можете ли вы сказать мне, где находится здание, где открывается бизнес?', 'kat_Geor')):
+              x = tok(text, return_tensors='np')
+              ids = x['input_ids'].astype(np.int64); mask = x['attention_mask'].astype(np.int64)
+              hid = enc.run(None, {'input_ids': ids, 'attention_mask': mask})[0]
+              past = {i.name: np.zeros((1, i.shape[1] if isinstance(i.shape[1], int) else 16, 0,
+                                        i.shape[3] if isinstance(i.shape[3], int) else 64), np.float32)
+                      for i in dec.get_inputs() if i.name.startswith('past_key_values.')}
+              out = [2, tok.convert_tokens_to_ids(tgt)]
+              for _ in range(60):
+                  feed = {'input_ids': np.array([out], np.int64), 'encoder_hidden_states': hid,
+                          'encoder_attention_mask': mask, **past}
+                  if 'use_cache_branch' in [i.name for i in dec.get_inputs()]:
+                      feed['use_cache_branch'] = np.array([False])
+                  logits = dec.run(['logits'], feed)[0][0, -1]
+                  nxt = int(np.argmax(logits))
+                  if nxt == 2: break
+                  out.append(nxt)
+              print(tgt, '→', tok.decode(out, skip_special_tokens=True))
+              assert len(out) > 3, 'модель не выдала перевод'
+          PY
+
+      - name: Publish release "nllb"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          gh release delete nllb --yes --cleanup-tag || true
+          gh release create nllb out/* --target "$GITHUB_SHA" \
+            --title "NLLB-200 distilled 1.3B (int8 ONNX)" \
+            --notes "Модель перевода NLLB-200 distilled 1.3B (int8). Приложение скачивает её само." \
+            --prerelease

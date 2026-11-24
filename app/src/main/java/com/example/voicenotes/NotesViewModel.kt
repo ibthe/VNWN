@@ -166,8 +166,8 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
             appendLine("ABI: ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
             appendLine("ОЗУ свободно: ${mi.availMem / 1048576} МБ из ${mi.totalMem / 1048576} МБ")
             appendLine("Куча приложения: макс. ${Runtime.getRuntime().maxMemory() / 1048576} МБ")
-            val dir = java.io.File(modelsRoot, "models/nllb")
-            appendLine("-- файлы модели NLLB (${dir.path}):")
+            val dir = java.io.File(modelsRoot, "models/nllb13")
+            appendLine("-- файлы модели NLLB 1.3B (${dir.path}):")
             val files = dir.listFiles()
             if (files.isNullOrEmpty()) appendLine("   (пусто, модель не скачана)")
             else files.sortedBy { it.name }.forEach { appendLine("   ${it.name} ${"%.1f".format(it.length() / 1048576.0)} МБ") }

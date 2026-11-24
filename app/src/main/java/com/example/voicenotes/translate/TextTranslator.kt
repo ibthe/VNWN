@@ -24,7 +24,7 @@ import java.nio.LongBuffer
 
 /** Модель перевода ещё не скачана (меню → «Модели распознавания» → «Перевод (NLLB-200)»). */
 class NllbNotInstalledException :
-    Exception("Модель перевода не скачана: меню → «Модели распознавания» → «Перевод (NLLB-200, 600M)»")
+    Exception("Модель перевода не скачана: меню → «Модели распознавания» → «Перевод (NLLB-200, 1.3B)»")
 
 /** Цепочка «Класс: сообщение ← причина», чтобы по тосту было видно, что именно сломалось. */
 fun Throwable.describeChain(): String {
@@ -81,17 +81,18 @@ fun diagnoseOrt(context: android.content.Context, t: Throwable?): String {
 }
 
 /**
- * Перевод текста на устройстве моделью NLLB-200 (distilled, 600M, int8) через ONNX Runtime.
+ * Перевод текста на устройстве моделью NLLB-200 (distilled, 1.3B, int8) через ONNX Runtime.
  * Текст никуда не отправляется. Языки: "ru", "en", "ka", перевод идёт напрямую между любой парой.
  *
  * Качество: перед переводом текст чистится и режется на короткие фразы ([TextPreprocessor]),
  * декодирование идёт лучевым поиском (beam search), а не жадным.
  *
- * Модель тяжёлая (около 1 ГБ в памяти), поэтому грузится при первом переводе
+ * Модель тяжёлая (около 3 ГБ в памяти), поэтому грузится при первом переводе
  * и выгружается из памяти после [IDLE_UNLOAD_MS] простоя.
  */
 class TextTranslator(modelsRoot: File) {
-    private val dir = File(modelsRoot, "models/nllb")
+    private val dir = File(modelsRoot, "models/nllb13")
+    private val legacyDir = File(modelsRoot, "models/nllb")   // старая модель 600M
     private val mutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var unloadJob: Job? = null
@@ -116,6 +117,7 @@ class TextTranslator(modelsRoot: File) {
     @Suppress("UNUSED_PARAMETER")
     suspend fun translate(text: String, from: String, to: String, online: Boolean = false): String {
         if (!isInstalled()) throw NllbNotInstalledException()
+        if (legacyDir.exists()) runCatching { legacyDir.deleteRecursively() }   // освобождаем ~850 МБ
         val src = nllbCode(from)
         val dst = nllbCode(to)
         return withContext(Dispatchers.Default) {
