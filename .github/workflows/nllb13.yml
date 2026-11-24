@@ -38,10 +38,13 @@ jobs:
           set -e
           pip install --quiet "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu
           pip install --quiet "optimum[onnxruntime]==1.23.3" "transformers==4.46.3" "onnx==1.17.0" \
-            "onnxruntime==1.20.1" "accelerate==1.1.1" sentencepiece protobuf "numpy<2"
-          pip list 2>/dev/null | grep -i -E "^(torch|optimum|transformers|accelerate|onnx|onnxruntime|numpy) "
+            "onnxruntime==1.20.1" sentencepiece protobuf "numpy<2"
+          pip list 2>/dev/null | grep -i -E "^(torch|optimum|transformers|onnx|onnxruntime|numpy) "
 
       - name: Export facebook/nllb-200-distilled-1.3B to ONNX
+        env:
+          # быстрая реализация protobuf не умеет считать размер моделей >2 ГБ («Failed to serialize proto»)
+          PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
         run: |
           set -e
           # через Python API: без проверки против PyTorch (она держит в памяти ещё одну копию модели);
@@ -62,16 +65,22 @@ jobs:
           set -e
           mkdir -p out
           python3 - <<'PY'
-          import os
+          import os, onnx
           from onnxruntime.quantization import quantize_dynamic, QuantType
+          os.makedirs('/tmp/q', exist_ok=True)
           for src, dst in (('encoder_model.onnx', 'nllb13-encoder.int8.onnx'),
                            ('decoder_model_merged.onnx', 'nllb13-decoder.int8.onnx')):
               print('квантование', src, flush=True)
-              quantize_dynamic('/tmp/onnx/' + src, 'out/' + dst, per_channel=True, reduce_range=True,
-                               weight_type=QuantType.QUInt8)
-              size = os.path.getsize('out/' + dst)
-              print(dst, round(size / 1048576), 'МБ', flush=True)
-              assert size < 2 * 1024**3, 'файл больше 2 ГБ: GitHub не примет его как файл релиза'
+              tmp = '/tmp/q/' + dst
+              quantize_dynamic('/tmp/onnx/' + src, tmp, per_channel=True, reduce_range=True,
+                               weight_type=QuantType.QUInt8, use_external_data_format=True)
+              m = onnx.load(tmp)    # подтягивает внешние данные
+              size = m.ByteSize()
+              print(dst, 'в памяти', round(size / 1048576), 'МБ', flush=True)
+              assert size < 2 * 1024**3, 'модель больше 2 ГБ: GitHub не примет её как один файл релиза'
+              onnx.save_model(m, 'out/' + dst, save_as_external_data=False)   # один самодостаточный файл
+              print(dst, round(os.path.getsize('out/' + dst) / 1048576), 'МБ', flush=True)
+              del m
           PY
           python3 tools/nllb_vocab.py /tmp/onnx out nllb13
           rm -rf /tmp/onnx/*.onnx_data /tmp/onnx/encoder_model.onnx /tmp/onnx/decoder_model_merged.onnx
