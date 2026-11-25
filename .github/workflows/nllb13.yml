@@ -52,11 +52,11 @@ jobs:
           python3 - <<'PY'
           from optimum.exporters.onnx import main_export
           main_export("facebook/nllb-200-distilled-1.3B", output="/tmp/onnx",
-                      task="text2text-generation-with-past", device="cpu", do_validation=False)
+                      task="text2text-generation-with-past", device="cpu", do_validation=False,
+                      no_post_process=True)
           PY
           ls -lh /tmp/onnx
-          # нужен только объединённый декодер; остальное и кэш загрузок удаляем ради места
-          rm -f /tmp/onnx/decoder_model.onnx* /tmp/onnx/decoder_with_past_model.onnx*
+          # кэш загрузок удаляем ради места
           rm -rf ~/.cache/huggingface
           df -h /
 
@@ -64,26 +64,45 @@ jobs:
         run: |
           set -e
           mkdir -p out
+          # Декодеры квантуем ПО ОТДЕЛЬНОСТИ и объединяем после. Если квантовать уже объединённый,
+          # квантованные веса дублируются в обеих ветках и модель выходит больше 2 ГБ.
           python3 - <<'PY'
-          import os, onnx
+          import os, shutil, onnx
           from onnxruntime.quantization import quantize_dynamic, QuantType
+          LIMIT = 2 * 1024**3
           os.makedirs('/tmp/q', exist_ok=True)
-          for src, dst in (('encoder_model.onnx', 'nllb13-encoder.int8.onnx'),
-                           ('decoder_model_merged.onnx', 'nllb13-decoder.int8.onnx')):
+
+          def quant(src, dst):
               print('квантование', src, flush=True)
-              tmp = '/tmp/q/' + dst
-              quantize_dynamic('/tmp/onnx/' + src, tmp, per_channel=True, reduce_range=True,
+              quantize_dynamic('/tmp/onnx/' + src, '/tmp/q/' + dst, per_channel=True, reduce_range=True,
                                weight_type=QuantType.QUInt8, use_external_data_format=True)
-              m = onnx.load(tmp)    # подтягивает внешние данные
-              size = m.ByteSize()
-              print(dst, 'в памяти', round(size / 1048576), 'МБ', flush=True)
-              assert size < 2 * 1024**3, 'модель больше 2 ГБ: GitHub не примет её как один файл релиза'
-              onnx.save_model(m, 'out/' + dst, save_as_external_data=False)   # один самодостаточный файл
-              print(dst, round(os.path.getsize('out/' + dst) / 1048576), 'МБ', flush=True)
-              del m
+              for f in os.listdir('/tmp/onnx'):       # fp32 больше не нужен: экономим диск
+                  if f == src or f == src + '_data':
+                      os.remove('/tmp/onnx/' + f)
+
+          quant('encoder_model.onnx', 'encoder.onnx')
+          quant('decoder_model.onnx', 'decoder.onnx')
+          quant('decoder_with_past_model.onnx', 'decoder_with_past.onnx')
+
+          m = onnx.load('/tmp/q/encoder.onnx')
+          size = m.ByteSize()
+          print('энкодер int8:', round(size / 1048576), 'МБ', flush=True)
+          assert size < LIMIT, 'энкодер больше 2 ГБ'
+          onnx.save_model(m, 'out/nllb13-encoder.int8.onnx', save_as_external_data=False)
+          del m
+
+          from optimum.onnx.graph_transformations import merge_decoders
+          print('объединение декодеров', flush=True)
+          merge_decoders('/tmp/q/decoder.onnx', '/tmp/q/decoder_with_past.onnx',
+                         save_path='out/nllb13-decoder.int8.onnx', strict=False)
+          for f in sorted(os.listdir('out')):
+              print(f, round(os.path.getsize('out/' + f) / 1048576), 'МБ', flush=True)
+          leftovers = [f for f in os.listdir('out') if f.endswith('_data') or f.endswith('.data')]
+          assert not leftovers, f'декодер вышел больше 2 ГБ и разбился на файлы: {leftovers}'
+          assert os.path.getsize('out/nllb13-decoder.int8.onnx') < LIMIT, 'декодер больше 2 ГБ'
           PY
           python3 tools/nllb_vocab.py /tmp/onnx out nllb13
-          rm -rf /tmp/onnx/*.onnx_data /tmp/onnx/encoder_model.onnx /tmp/onnx/decoder_model_merged.onnx
+          rm -rf /tmp/q /tmp/onnx/*.onnx /tmp/onnx/*.onnx_data
           ls -lh out
 
       - name: Smoke test (quantized models must translate)
